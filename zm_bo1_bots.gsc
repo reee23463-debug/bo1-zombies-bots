@@ -1172,11 +1172,9 @@ bo1_water_add(org, learned)
 	bo1bots_dbg("water spot added, " + level.bo1_water.size + " known");
 	if(!learned)
 		return;
-	// a spot the bots found themselves: tell the player and keep the list in a dvar in the same "x y z;x y z" format
+	// a spot the bots found themselves: keep the list in a dvar (silently) in the same "x y z;x y z" format
 	// that bo1_bots_george_water reads, so it can be copied straight over (read it with: bo1_bots_george_water_found)
 	txt = int(org[0]) + " " + int(org[1]) + " " + int(org[2]);
-	iprintln("^5BO1 bots: water found at " + txt);
-	print("BO1 bots: water found at " + txt + "\n");
 	old = getdvar("bo1_bots_george_water_found");
 	if(old == "")
 		setdvar("bo1_bots_george_water_found", txt);

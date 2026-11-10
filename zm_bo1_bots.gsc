@@ -1039,7 +1039,7 @@ bo1_find_special(r)
 // and kept for 5s so the bot doesn't flip-flop.
 //   round 1                      : 100 (knife only anyway)
 //   round 2                      : 50, then 8 lower every round (floored at 0)
-//   insta-kill active            : 98 (very very high, ignores crowds)
+//   insta-kill active            : 98 (very very high), but 0 if 4+ zombies are packed around it (they shoot instead)
 //   bowie / sickle owned         : at least 92 while the knife still kills in ONE hit; once the zombie needs two
 //                                  hits the boost is gone and only the round curve applies
 //   crowd around the zombie      : -30 when 3+ zombies are near it (2+ from round 6 on)
@@ -1097,8 +1097,16 @@ bo1_knife_confidence(z)
 	r = bo1_cur_round();
 	if(r <= 1)
 		return 100;
+	// insta-kill: very very high, but never run into a big pack (bo1_bots_knife_ik_crowd zombies near it, default 4)
 	if(bo1_instakill_on())
+	{
+		ikc = 4;
+		if(getdvar("bo1_bots_knife_ik_crowd") != "")
+			ikc = getdvarint("bo1_bots_knife_ik_crowd");
+		if(bo1_count_zombies(z.origin, 150) >= ikc)
+			return 0;
 		return 98;
+	}
 
 	conf = bo1_round_confidence();
 
@@ -2451,8 +2459,14 @@ bo1_pick_shop()
 		if(is_fire_sale)
 			box_pr = 80;
 
-		// Consider box if bot has a free weapon slot OR worst gun is not already high-tier (< 2500)
-		if(prims.size < limit || worst < 2500)
+		// Consider box if bot has a free weapon slot OR its worst gun is not already top-tier. Wall guns like the
+		// Olympia (rank 2800) or the M14 (3500) are NOT top-tier: the old cutoff of 2500 made bots holding two wall guns
+		// skip the box forever. Top-tier now means upgraded / wonder weapon level (6000+). bo1_bots_box_cutoff changes it.
+		// (bo1_box_take_ok still stops them from swapping a good gun for a worse box gun.)
+		cutoff = 6000;
+		if(getdvar("bo1_bots_box_cutoff") != "")
+			cutoff = getdvarint("bo1_bots_box_cutoff");
+		if(prims.size < limit || worst < cutoff)
 			self bo1_consider(box, "box", box_pr, box_cost, 1200);
 	}
 

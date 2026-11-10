@@ -31,6 +31,19 @@ bo1bots_humans_alive()
 	return n;
 }
 
+// humans that are connected, spawned or not
+bo1bots_humans_connected()
+{
+	n = 0;
+	players = get_players();
+	for(i = 0; i < players.size; i++)
+	{
+		if(!isDefined(players[i].bo1))
+			n++;
+	}
+	return n;
+}
+
 bo1bots_start()
 {
 	level endon("end_game");
@@ -41,12 +54,14 @@ bo1bots_start()
 		// Dead Ops Arcade has no round_number
 		if(!isDefined(level.round_number) && !bo1_is_arcade())
 			continue;
-		if(bo1bots_humans_alive() > 0)
+		// Round 1 fix: don't wait for the human to be fully spawned in, a human that is merely connected is enough.
+		// Waiting for "alive" + a delay + 1.5s per bot let round 1 start first, and a player who connects after the
+		// round has begun sits as a spectator until the next round.
+		if(bo1bots_humans_connected() > 0)
 			break;
 	}
-	// Join right away so the bots are in before round 1 starts (a player who connects after the round has begun
-	// waits as a spectator until the next round). bo1_bots_join_delay = seconds to wait after the first human spawns.
-	jd = 1.5;
+	// bo1_bots_join_delay = seconds to wait after the first human connects (default 0.25)
+	jd = 0.25;
 	if(getdvar("bo1_bots_join_delay") != "")
 		jd = getdvarfloat("bo1_bots_join_delay");
 	if(jd > 0)
@@ -84,7 +99,11 @@ bo1bots_start()
 			break;
 		}
 		bot thread bo1bots_on_connect();
-		wait 1.5;
+		// short gap between joins so all bots are in before round 1 starts (bo1_bots_join_gap, default 0.4s)
+		gap = 0.4;
+		if(getdvar("bo1_bots_join_gap") != "")
+			gap = getdvarfloat("bo1_bots_join_gap");
+		wait gap;
 	}
 	iprintln("^2BO1 bots: spawned");
 	if(!bo1_is_arcade())
@@ -419,14 +438,23 @@ bo1bots_on_connect()
 	self.bo1.snap_score = 0;
 
 	// give it a few seconds to spawn on its own, otherwise spawn it by hand
+	// round 1: don't sit around for 8s, a bot that hasn't spawned after 3s is stuck as a spectator
+	maxwait = 8;
+	if(!isDefined(level.round_number) || level.round_number <= 1)
+		maxwait = 3;
 	t = 0;
-	while(!(isDefined(self.sessionstate) && self.sessionstate == "playing") && t < 8)
+	while(!(isDefined(self.sessionstate) && self.sessionstate == "playing") && t < maxwait)
 	{
 		wait 0.5;
 		t += 0.5;
 	}
-	// Forcing a spawn (bo1_bots_force_spawn 1) is what produced invisible half-spawned bots on some maps, so it is off.
-	if(!(isDefined(self.sessionstate) && self.sessionstate == "playing") && isDefined(level.spawnplayer) && getdvarint("bo1_bots_force_spawn") == 1)
+	// Forcing a spawn: bo1_bots_force_spawn 0 = never, 1 = always (invisible half-spawned bots on some maps),
+	// 2 = only during round 1 (default), which is when a late bot gets stuck as a spectator.
+	fs = 2;
+	if(getdvar("bo1_bots_force_spawn") != "")
+		fs = getdvarint("bo1_bots_force_spawn");
+	r1 = !isDefined(level.round_number) || level.round_number <= 1;
+	if(!(isDefined(self.sessionstate) && self.sessionstate == "playing") && isDefined(level.spawnplayer) && (fs == 1 || (fs == 2 && r1)))
 	{
 		bo1bots_dbg(self.name + " not spawned, calling level.spawnplayer");
 		self [[level.spawnplayer]]();
@@ -798,7 +826,9 @@ bo1_move_dir_raw(dir)
 	r = int(vectordot(dir, right) * 127);
 	self botmovement(f, r);
 	// run when walking mostly forward, never while shooting (sprinting stops the weapon) or downed
-	run = f > 100 && !bo1_down(self) && (!isDefined(self.bo1.shot_t) || gettime() - self.bo1.shot_t > 400);
+	// a bot charging a zombie to knife it keeps sprinting (rush_run_t is refreshed by the brain while it closes in)
+	charging = isDefined(self.bo1.rush_run_t) && gettime() < self.bo1.rush_run_t;
+	run = f > 100 && !bo1_down(self) && (charging || !isDefined(self.bo1.shot_t) || gettime() - self.bo1.shot_t > 400);
 	self bo1_run(run);
 }
 
@@ -1003,6 +1033,134 @@ bo1_find_special(r)
 
 // ---------------------------------------------------------------- shooting
 
+// ---------------------------------------------------------------- knife confidence
+//
+// Confidence 0-100 = chance that a bot runs up and knifes a zombie instead of shooting it. Rolled once per zombie
+// and kept for 5s so the bot doesn't flip-flop.
+//   round 1                      : 100 (knife only anyway)
+//   round 2                      : 50, then 8 lower every round (floored at 0)
+//   insta-kill active            : 98 (very very high, ignores crowds)
+//   bowie / sickle owned         : at least 92 while the knife still kills in ONE hit; once the zombie needs two
+//                                  hits the boost is gone and only the round curve applies
+//   crowd around the zombie      : -30 when 3+ zombies are near it (2+ from round 6 on)
+//   hurt bot (< 40% health), dogs: never rush
+// dvars: bo1_bots_knife_rush 0 = off, bo1_bots_knife_r2 (50), bo1_bots_knife_step (8), bo1_bots_knife_crowd (30),
+//        bo1_bots_melee_dmg (150), bo1_bots_melee_dmg_up (1000; what the bowie / sickle do to a zombie)
+
+bo1_cur_round()
+{
+	if(isDefined(level.round_number))
+		return level.round_number;
+	return 1;
+}
+
+bo1_round_confidence()
+{
+	r = bo1_cur_round();
+	if(r <= 1)
+		return 100;
+	base = 50;
+	if(getdvar("bo1_bots_knife_r2") != "")
+		base = getdvarint("bo1_bots_knife_r2");
+	step = 8;
+	if(getdvar("bo1_bots_knife_step") != "")
+		step = getdvarint("bo1_bots_knife_step");
+	c = base - (r - 2) * step;
+	if(c < 0)
+		c = 0;
+	return c;
+}
+
+bo1_instakill_on()
+{
+	return isDefined(level.zombie_vars) && isDefined(level.zombie_vars["zombie_powerup_insta_kill_on"]) && level.zombie_vars["zombie_powerup_insta_kill_on"];
+}
+
+// damage one knife swing does to a zombie
+bo1_melee_damage()
+{
+	if(self bo1_has_melee_upgrade())
+	{
+		d = 1000;
+		if(getdvar("bo1_bots_melee_dmg_up") != "")
+			d = getdvarint("bo1_bots_melee_dmg_up");
+		return d;
+	}
+	d = 150;
+	if(getdvar("bo1_bots_melee_dmg") != "")
+		d = getdvarint("bo1_bots_melee_dmg");
+	return d;
+}
+
+bo1_knife_confidence(z)
+{
+	r = bo1_cur_round();
+	if(r <= 1)
+		return 100;
+	if(bo1_instakill_on())
+		return 98;
+
+	conf = bo1_round_confidence();
+
+	// bowie / sickle: very high while it is still a one-hit kill, then it falls back to the round curve
+	if(self bo1_has_melee_upgrade())
+	{
+		dmg = self bo1_melee_damage();
+		hits = int((z.health + dmg - 1) / dmg);
+		if(hits <= 1 && conf < 92)
+			conf = 92;
+	}
+
+	// a crowd around the zombie makes running in a worse idea
+	need = 3;
+	if(r > 5)
+		need = 2;
+	if(bo1_count_zombies(z.origin, 150) >= need)
+	{
+		pen = 30;
+		if(getdvar("bo1_bots_knife_crowd") != "")
+			pen = getdvarint("bo1_bots_knife_crowd");
+		conf -= pen;
+	}
+
+	if(conf < 0)
+		conf = 0;
+	if(conf > 100)
+		conf = 100;
+	return conf;
+}
+
+// true when this bot should run up and knife z. Sets self.bo1.rush_z (used by bo1_shoot).
+bo1_knife_rush(z)
+{
+	b = self.bo1;
+	if(bo1_knife_only())
+	{
+		b.rush_z = z;
+		return true;
+	}
+	if((getdvar("bo1_bots_knife_rush") != "" && getdvarint("bo1_bots_knife_rush") == 0) || bo1_is_dog(z) || self.health < self.maxhealth * 0.4)
+	{
+		b.rush_z = undefined;
+		return false;
+	}
+	if(!isDefined(b.roll_z) || b.roll_z != z || !isDefined(b.roll_t) || gettime() > b.roll_t)
+	{
+		conf = self bo1_knife_confidence(z);
+		b.roll_z = z;
+		b.roll_t = gettime() + 5000;
+		b.roll_ok = randomint(100) < conf;
+		bo1bots_dbg(self.name + " knife confidence " + conf + ": rush " + b.roll_ok);
+	}
+	if(b.roll_ok)
+	{
+		b.rush_z = z;
+		return true;
+	}
+	b.rush_z = undefined;
+	return false;
+}
+
 // round 1 is knife only (no guns, no grenades); later rounds are back to normal
 bo1_knife_only()
 {
@@ -1159,9 +1317,9 @@ bo1_shoot(z, zd)
 	if(mode == 2)
 		level.bo1_fire = "script";
 
-	// round 1: knife only, never pull the trigger. Spam the knife: the melee button only swings once per
-	// press, so it has to be tapped every frame, and the bot starts swinging from a bit further out.
-	if(bo1_knife_only())
+	// round 1 (or a knife rush on this zombie): knife only, never pull the trigger. Spam the knife: the melee button
+	// only swings once per press, so it has to be tapped every frame, and the bot starts swinging from a bit further out.
+	if(bo1_knife_only() || (isDefined(self.bo1.rush_z) && self.bo1.rush_z == z))
 	{
 		self bo1_off("attack");
 		self bo1_off("ads");
@@ -3172,11 +3330,15 @@ bo1bots_brain()
 		{
 			self bo1_face(bo1_aimpos(z));
 			zd = distance(self.origin, z.origin);
-			if(!bo1_knife_only())
+			// knife confidence: run up and knife this zombie instead of shooting / backing off (always true in round 1)
+			rush = self bo1_knife_rush(z);
+			if(!bo1_knife_only() && !rush)
 			{
 				self bo1_throw_think(z);
 				self bo1_pick_weapon(zd);
 			}
+			if(rush && zd > 140)
+				self.bo1.rush_run_t = gettime() + 300;
 			self bo1_shoot(z, zd);
 
 			// a power-up in sight beats backing off / closing in, unless the zombie is right on us
@@ -3184,8 +3346,8 @@ bo1bots_brain()
 			{
 				self bo1_move_dir(self bo1_nav_point(goal) - self.origin);
 			}
-			// round 1 (knife only): walk up to the zombie instead of backing off
-			else if(bo1_knife_only())
+			// round 1 (knife only) or a confident knife rush: walk up to the zombie instead of backing off
+			else if(bo1_knife_only() || rush)
 			{
 				if(zd > 40)
 					self bo1_move_dir(z.origin - self.origin);

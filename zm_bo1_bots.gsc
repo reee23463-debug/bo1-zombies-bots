@@ -107,7 +107,23 @@ bo1bots_start()
 	}
 	iprintln("^2BO1 bots: spawned");
 	if(!bo1_is_arcade())
+	{
 		level thread bo1bots_lure();
+		level thread bo1bots_water_watch();
+	}
+}
+
+// learns where the water is all game long (needed for leading George into it), not only while he is enraged
+bo1bots_water_watch()
+{
+	level endon("end_game");
+	if(!bo1_george_on())
+		return;
+	for(;;)
+	{
+		wait 0.5;
+		bo1_water_learn();
+	}
 }
 
 // ---------------------------------------------------------------- spawn protection
@@ -963,6 +979,9 @@ bo1_find_target()
 			continue;
 		if(bo1_is_special(z))
 			continue;
+		// George Romero has 250k+ health: not worth the ammo until he is nearly dead
+		if(bo1_george_ignore(z))
+			continue;
 		// a dog is still invulnerable (magic bullet shield) while it spawns in: don't waste ammo on it
 		if(isDefined(z.magic_bullet_shield) && z.magic_bullet_shield)
 			continue;
@@ -1029,6 +1048,272 @@ bo1_find_special(r)
 			return z;
 	}
 	return undefined;
+}
+
+// ---------------------------------------------------------------- Call of the Dead: George Romero
+//
+// Built from _zombiemode_ai_director.gsc. Facts used:
+//   - he is level.zombie_director, animname "director_zombie"
+//   - his real .health is reset to 1,000,000 on every hit; his true health is dmg_taken / max_damage_taken
+//     (max_damage_taken = 250,000 per player), so health left % = 100 - dmg_taken * 100 / max_damage_taken
+//   - enraged = is_activated (true = sprinting / angry, set back to false when he calms down)
+//   - in_water is true while he stands in water (water_trigger holds the trigger he is in)
+// The bots mostly ignore him (never pick him as a target) unless he has 5% health left or less (bo1_bots_george_hp).
+// When he is enraged, the bot he is chasing (the closest living player to him) runs to water so he follows and calms.
+// bo1_bots_george 0 turns all of this off.
+//
+// Where the water is: the director script doesn't say. The bots use, in this order:
+//   1. spots you set:  bo1_bots_george_water "x y z;x y z"
+//   2. triggers named *water* (targetname / script_noteworthy)
+//   3. water triggers they SEE: any zombie or George standing in water gives away its water_trigger
+// bo1_bots_debug 1 prints how many spots are known.
+
+bo1_flag(v)
+{
+	return isDefined(v) && v;
+}
+
+bo1_george_on()
+{
+	return !(getdvar("bo1_bots_george") != "" && getdvarint("bo1_bots_george") == 0);
+}
+
+bo1_is_george(z)
+{
+	if(!bo1_george_on() || !isDefined(z))
+		return false;
+	if(isDefined(level.zombie_director) && z == level.zombie_director)
+		return true;
+	if(isDefined(z.animname) && z.animname == "director_zombie")
+		return true;
+	if(isDefined(z.bot_george))
+		return true;
+	return false;
+}
+
+// health he has left, in percent (his .health is always full, the damage he took is what counts)
+bo1_george_hp_pct(g)
+{
+	if(!isDefined(g.max_damage_taken) || g.max_damage_taken <= 0 || !isDefined(g.dmg_taken))
+		return 100;
+	left = g.max_damage_taken - g.dmg_taken;
+	if(left < 0)
+		left = 0;
+	return left * 100 / g.max_damage_taken;
+}
+
+// true = leave him alone (he is George and not nearly dead, or he is leaving / entering the map)
+bo1_george_ignore(z)
+{
+	if(!bo1_is_george(z))
+		return false;
+	if(bo1_flag(z.defeated) || bo1_flag(z.leaving_level) || bo1_flag(z.entering_level))
+		return true;
+	lim = 5;
+	if(getdvar("bo1_bots_george_hp") != "")
+		lim = getdvarint("bo1_bots_george_hp");
+	return bo1_george_hp_pct(z) > lim;
+}
+
+bo1_find_george()
+{
+	if(!bo1_george_on())
+		return undefined;
+	g = level.zombie_director;
+	if(isDefined(g) && isAlive(g))
+		return g;
+	return undefined;
+}
+
+bo1_george_enraged(g)
+{
+	return bo1_flag(g.is_activated);
+}
+
+// "x y z;x y z" -> origins
+bo1_george_parse_spots(s)
+{
+	out = [];
+	if(!isDefined(s) || s == "")
+		return out;
+	parts = strtok(s, ";");
+	for(i = 0; i < parts.size; i++)
+	{
+		c = strtok(parts[i], " ");
+		if(c.size >= 3)
+			out[out.size] = (float(c[0]), float(c[1]), float(c[2]));
+	}
+	return out;
+}
+
+bo1_george_dvar_spots()
+{
+	return bo1_george_parse_spots(getdvar("bo1_bots_george_water"));
+}
+
+// Call of the Dead water spots the bots recorded (bo1_bots_george_water_found). Deep ones (below -30) are left out.
+bo1_coast_water_spots()
+{
+	s = "";
+	s = s + "-1679 631 -23;-1768 678 0;-1702 756 -10;-1598 751 -23;-1489 609 -23;-1793 842 -1;-1288 493 -12;-1612 247 -3;-1587 133 -23;-1591 444 -2;-1500 279 -23;1868 349 -21;1994 391 -23;2022 496 -23;2071 655 -23;2166 596 -23;2006 735 -20;1902 760 -1;1825 828 -3;";
+	s = s + "1765 915 -10;1702 1007 -20;1643 1095 -23;1584 1183 -18;1525 1279 -20;1470 1369 -19;1416 1458 -17;1362 1544 -19;-1714 373 -3;-1688 1008 -23;-1595 940 -23;-1513 867 -23;1182 1762 -16;-1400 305 -23;-1430 795 -23;-1299 331 -21;-1353 714 -23;1819 1103 -23;";
+	s = s + "-1269 648 -19;1638 926 -13;1234 1676 -8;771 -148 -23;1493 1140 -23;1471 1039 -23;771 -32 -12;-74 3385 -1;-239 2880 -11;-205 2975 -23;-223 3088 -23;-234 3194 -23;-171 3331 -23;1547 971 -14";
+	return bo1_george_parse_spots(s);
+}
+
+bo1_water_add(org, learned)
+{
+	for(i = 0; i < level.bo1_water.size; i++)
+	{
+		if(distance(level.bo1_water[i], org) < 100)
+			return;
+	}
+	level.bo1_water[level.bo1_water.size] = org;
+	bo1bots_dbg("water spot added, " + level.bo1_water.size + " known");
+	if(!learned)
+		return;
+	// a spot the bots found themselves: tell the player and keep the list in a dvar in the same "x y z;x y z" format
+	// that bo1_bots_george_water reads, so it can be copied straight over (read it with: bo1_bots_george_water_found)
+	txt = int(org[0]) + " " + int(org[1]) + " " + int(org[2]);
+	iprintln("^5BO1 bots: water found at " + txt);
+	print("BO1 bots: water found at " + txt + "\n");
+	old = getdvar("bo1_bots_george_water_found");
+	if(old == "")
+		setdvar("bo1_bots_george_water_found", txt);
+	else if(old.size < 900)
+		setdvar("bo1_bots_george_water_found", old + ";" + txt);
+}
+
+// the static part, found once: dvar spots and anything named *water*
+bo1_water_init()
+{
+	if(isDefined(level.bo1_water))
+		return;
+	level.bo1_water = [];
+	level.bo1_water_t = 0;
+	sp = bo1_george_dvar_spots();
+	for(i = 0; i < sp.size; i++)
+		bo1_water_add(sp[i], false);
+	if(sp.size > 0)
+		return;
+	// no spots of your own: on Call of the Dead use the built-in list
+	if(tolower(getdvar("mapname")) == "zombie_coast")
+	{
+		bs = bo1_coast_water_spots();
+		for(i = 0; i < bs.size; i++)
+			bo1_water_add(bs[i], false);
+		if(bs.size > 0)
+			return;
+	}
+	classes = [];
+	classes[0] = "trigger_multiple";
+	classes[1] = "trigger_radius";
+	classes[2] = "trigger_use";
+	for(c = 0; c < classes.size; c++)
+	{
+		ents = getentarray(classes[c], "classname");
+		for(i = 0; i < ents.size; i++)
+		{
+			e = ents[i];
+			if(!isDefined(e) || !isDefined(e.origin))
+				continue;
+			if((isDefined(e.targetname) && issubstr(tolower(e.targetname), "water")) || (isDefined(e.script_noteworthy) && issubstr(tolower(e.script_noteworthy), "water")))
+				bo1_water_add(e.origin, false);
+		}
+	}
+}
+
+// the learning part, every 0.5s: anybody standing in water (George, zombies, bots, humans) marks a water spot where
+// they stand, which is a place that can be walked to. Looks at in_water / water_trigger, the same fields the director
+// script uses.
+bo1_water_learn()
+{
+	bo1_water_init();
+	if(gettime() < level.bo1_water_t)
+		return;
+	level.bo1_water_t = gettime() + 500;
+	list = [];
+	if(isDefined(level.zombie_director))
+		list[list.size] = level.zombie_director;
+	zs = bo1_enemies();
+	for(i = 0; i < zs.size; i++)
+		list[list.size] = zs[i];
+	players = get_players();
+	for(i = 0; i < players.size; i++)
+		list[list.size] = players[i];
+	for(i = 0; i < list.size; i++)
+	{
+		e = list[i];
+		if(!isDefined(e) || !isDefined(e.origin))
+			continue;
+		if(bo1_flag(e.in_water) || isDefined(e.water_trigger))
+			bo1_water_add(e.origin, true);
+	}
+}
+
+// where this bot should run to lead an enraged George into the water, or undefined
+bo1_george_water_goal()
+{
+	g = bo1_find_george();
+	if(!isDefined(g) || !bo1_george_enraged(g))
+		return undefined;
+	// leaving / entering the map, or already standing in water: nothing to do
+	if(bo1_flag(g.defeated) || bo1_flag(g.leaving_level) || bo1_flag(g.entering_level) || bo1_flag(g.in_water))
+		return undefined;
+
+	// only the player he is chasing (the closest one standing) does it
+	players = get_players();
+	closest = undefined;
+	cd = 99999999;
+	for(i = 0; i < players.size; i++)
+	{
+		p = players[i];
+		if(!isDefined(p) || !isAlive(p) || bo1_down(p))
+			continue;
+		if(isDefined(p.sessionstate) && p.sessionstate != "playing")
+			continue;
+		d = distancesquared(g.origin, p.origin);
+		if(d < cd)
+		{
+			cd = d;
+			closest = p;
+		}
+	}
+	if(!isDefined(closest) || closest != self)
+		return undefined;
+
+	bo1_water_learn();
+	if(level.bo1_water.size == 0)
+	{
+		if(!isDefined(level.bo1_water_msg) || gettime() > level.bo1_water_msg)
+		{
+			level.bo1_water_msg = gettime() + 10000;
+			bo1bots_dbg("^3George is enraged but no water spot is known yet (set bo1_bots_george_water \"x y z\")");
+		}
+		return undefined;
+	}
+	best = undefined;
+	bd = 99999999;
+	for(i = 0; i < level.bo1_water.size; i++)
+	{
+		d = distancesquared(self.origin, level.bo1_water[i]);
+		if(d < bd)
+		{
+			bd = d;
+			best = level.bo1_water[i];
+		}
+	}
+	if(!isDefined(best))
+		return undefined;
+	gp = groundpos(best + (0, 0, 64));
+	if(isDefined(gp))
+		best = gp;
+	if(!isDefined(self.bo1.george_dbg) || gettime() > self.bo1.george_dbg)
+	{
+		self.bo1.george_dbg = gettime() + 5000;
+		bo1bots_dbg(self.name + " leading enraged George to the water");
+	}
+	return best;
 }
 
 // ---------------------------------------------------------------- shooting
@@ -3195,6 +3480,17 @@ bo1bots_brain()
 			}
 			goal = mate.origin;
 			goal_r = 50;
+		}
+
+		// 1a. George Romero is enraged and chasing us: lead him into the water, it calms him down
+		if(!isDefined(goal))
+		{
+			gw = self bo1_george_water_goal();
+			if(isDefined(gw))
+			{
+				goal = gw;
+				goal_r = 40;
+			}
 		}
 
 		// 1b. power-up drop on the floor (within 1500 units, walked to with the pathfinding). Gives up on one that it is

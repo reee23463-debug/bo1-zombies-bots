@@ -1,74 +1,4 @@
-// zm_bo1_bots.gsc - BO1 Zombies bots (Plutonium T5). v0.4, UNTESTED.
-// Install: %localappdata%\Plutonium\storage\t5\scripts\zm\zm_bo1_bots.gsc
-// Dvars:   bo1_bots_count (default 3)   bo1_bots_infinite_ammo (default 1)   bo1_bots_debug (default 0)
-//
-// BO1 zombies runs on the T5 SP engine, so the bot builtins are the SP set (Plutonium changelog r4811):
-//   isbot, addtestclient, botmeleeparams, botremoteangles, botangles, botstop, botmovement, botaction
-// botmovementoverride / botbuttonoverride / botaimoverride are MP-only and do NOT exist here.
-//   <bot> botmovement(forward, right)   -127..127
-//   <bot> botaction("+name") / ("-name")
-//   <bot> botangles(angles)
-// T5 has no AddGoal/FindPath, so walking is straight-line toward a goal with
-// jump / teleport-to-leader unstuck. Everything is a real trigger press, except the window-repair fallback (board_mode 0/2) which restores the chunks by script.
-// Master switch: bo1_bots_enabled (default 1). Set it to 0 and restart the map to turn the whole mod off, 1 to turn it back on.
-// Extra dvars: bo1_bots_fire_mode (0 auto-detect, 1 button only, 2 scripted shots only)   bo1_bots_special (0 = off)
-// If a button does nothing in game, add or reorder names in bo1_cands() below (only place names live).
 
-// Navigation: bo1_bots_nav 0 turns the engine pathfinding off (straight-line walking)
-// Names: bo1_bots_friend_names "A,B"  bo1_bots_names "X,Y"  bo1_bots_names_mode (0 both, 1 friends, 2 general list)
-// Tag: bo1_bots_tag "3arc" (default; empty or bo1_bots_tag_off 1 = none)  bo1_bots_tag_in_name (default 1)
-// v1.5: Bots default to Juggernog (bo1_bots_default_jug, 0 = off). Bowie/Sickle wall buys are priority 90, above the box, perks and guns.
-// v1.4: Spawn protection + Dead Ops Arcade.
-//       Bots are invincible for the first 10s after every spawn (dvar bo1_bots_spawn_protect, seconds, 0 = off) and are
-//       moved off anybody they spawned inside of. MOD_TELEFRAG damage (the engine's "two players overlap" kill) is now
-//       zeroed for everybody (dvar bo1_bots_block_telefrag 0 turns that off), and the damage hook is installed BEFORE the
-//       bots join, so the first spawn can't kill you or another bot any more.
-//       Dead Ops Arcade (map "zombietron"): bots use a separate, much simpler brain (shoot the nearest enemy, keep away from
-//       enemies and from each other, follow the nearest human). Dvar bo1_bots_arcade 1 forces it on, 0 forces it off.
-//       Arcade rules read from zombietron_main.gsc: bots count as real players (the game ends only when every player is
-//       dead with 0 lives), they stay away from open exits (any player touching one ends the round), and they work out
-//       by themselves whether the stick moves them relative to their view or relative to the camera.
-// v1.3: P.E.S. fixes. Bots now walk to a spot at the front of the locker that is inside the trigger (checked with
-//       istouching and a clear line to the trigger, so not behind the locker / a wall) instead of its raw origin, and
-//       the suit counts as "on" only while the bot really holds the suit weapon: after a bot dies or goes down the
-//       game can leave "suit on" / "already has equipment" flags behind, so those are cleared before it takes the suit
-//       again. Zombies near no longer stop a bot from fetching the suit, and the game's own put-on sequence is not
-//       interrupted any more (the bot waits for it to finish, then holds its best gun).
-// v1.2: Moon P.E.S. (space suit): on the Moon the bots walk to the nearest suit locker (trigger "zombie_equipment_upgrade"
-//       whose .zombie_equipment_upgrade is "equip_gasmask_zm"), take it with the use button, then switch to the suit
-//       weapon so the game's own equipment watcher puts the helmet on, and switch back to their gun. Dvar bo1_bots_suit 0 = off.
-// v1.1: Moon / No Man's Land: while the game is in No Man's Land (flag "enter_nml") the bots' only job is the teleporter
-//       out (the trigger with script_noteworthy "exit_no_mans_land"): they sprint to it, wait just outside while its gate
-//       (level.teleporter_exit_nml_gate_open) is still down, then stand on it and shoot what comes. The game teleports once
-//       every valid player touches the pad. Downed bots crawl to it. Dvar bo1_bots_nml 0 turns this off.
-//       Bots sprint whenever they walk forward and are not shooting. Dvar bo1_bots_run 0 turns it off.
-// v1.0: Mystery Box prioritized over wall weapons (box pr 65, Fire Sale pr 80, wall guns pr 45).
-//       Global box cooldown slashed from 30s to 4s. Window barrier repair fully overhauled:
-//       bots stand in the center of w.trigger_location.origin (the actual trigger cylinder),
-//       actively notify the stock trigger_radius entity, keep self._holding_button[level.BUTTON_USE]=true
-//       so use_button_held() passes the game's check, and use smooth single-chunk repair fallback
-//       instead of locking out the window for 20s if the trigger is delayed.
-// v0.9: Solo death fix hardened: damage wrapper now force-clears flag("solo_game"), level.is_solo_game,
-//       level.solo_game, and forces is_zombie=false + lives=9 on all bots BEFORE every damage forward.
-//       The 0.25s keep-alive loop does the same. Bots init with is_zombie=false and lives=9 on spawn.
-//       Window repair fix: use_button_held() is pre-initialized with a 0.5s warm-up before the repair
-//       loop so the stock blocker_trigger_think code sees the held button on its first check.
-// v0.8: game over on death fixed (solo rules are now kept off the whole game, not just once, and the player damage
-//       callback is wrapped so a human with a living teammate goes down instead of dying). Purchases are verified:
-//       if the game didn't take the full price, the missing part is taken through the game's own score function.
-// v0.6: bots see downed players (revive works), get start points + hit/kill/board points if the game
-//       doesn't pay them, and are targeted like players. Dvars: bo1_bots_points_mode (0 auto,1 game,2 script),
-//       bo1_bots_start_score (default 3000).
-// v0.7: bots no longer get a start bonus (bo1_bots_start_score now defaults to 0). Kills pay what players get:
-//       60 body, 100 headshot, 130 melee (doubled under double points), whichever way the game pays the bots.
-//       Wall guns were never bought because the wall triggers have no .zombie_cost in BO1 (cost is in
-//       level.zombie_weapons); fixed. Wall guns and the mystery box are bought with the real use press and
-//       fall back to firing the trigger directly (same trick as the bo2 bots) if the press does nothing.
-//       New dvar bo1_bots_buy_mode: 0 (default) fire the trigger first, 1 real press first. Wall guns also get a
-//       scripted give (takes the points, gives the gun) if the game doesn't react to the trigger at all.
-//       The weaker gun is held before a purchase so the game swaps that one out, and the best gun is held after.
-// v0.5: reworked window repair (stand-off spot inside the room, use-button check, progress tracking,
-//       scripted fallback). New dvar bo1_bots_board_mode (0 auto, 1 button only, 2 scripted only).
 
 #include maps\_utility;
 #include common_scripts\utility;
@@ -107,14 +37,20 @@ bo1bots_start()
 
 	for(;;)
 	{
-		wait 1;
+		wait 0.25;
 		// Dead Ops Arcade has no round_number
 		if(!isDefined(level.round_number) && !bo1_is_arcade())
 			continue;
 		if(bo1bots_humans_alive() > 0)
 			break;
 	}
-	wait 8;
+	// Join right away so the bots are in before round 1 starts (a player who connects after the round has begun
+	// waits as a spectator until the next round). bo1_bots_join_delay = seconds to wait after the first human spawns.
+	jd = 1.5;
+	if(getdvar("bo1_bots_join_delay") != "")
+		jd = getdvarfloat("bo1_bots_join_delay");
+	if(jd > 0)
+		wait jd;
 
 	count = 3;
 	if(getdvar("bo1_bots_count") != "")
@@ -833,6 +769,17 @@ bo1_run(on)
 
 // walk in world direction dir, whatever way the bot is looking
 bo1_move_dir(dir)
+{
+	if(lengthsquared((dir[0], dir[1], 0)) > 1 && self bo1_trap_blocks(dir))
+	{
+		self botmovement(0, 0);
+		self bo1_run(false);
+		return;
+	}
+	self bo1_move_dir_raw(dir);
+}
+
+bo1_move_dir_raw(dir)
 {
 	dir = (dir[0], dir[1], 0);
 	if(lengthsquared(dir) < 1)
@@ -1696,6 +1643,13 @@ bo1_has_melee_upgrade()
 	return self hasweapon("bowie_knife_zm") || self hasweapon("sickle_knife_zm");
 }
 
+bo1_perk_range()
+{
+	if(getdvar("bo1_bots_perk_range") != "")
+		return getdvarint("bo1_bots_perk_range");
+	return 2500;
+}
+
 bo1_perk_info(perk)
 {
 	// returns array [priority, cost] or undefined
@@ -1716,13 +1670,86 @@ bo1_perk_info(perk)
 // (level.zombie_weapons[w].cost, the same table the game's own wall triggers read)
 bo1_weapon_cost(w)
 {
+	return bo1_weapon_rank(w);
+}
+
+// How good a gun is (same scale as wall prices). Names from the BO1 weapon list (*_zm). The game's own cost table cannot be
+// used for this: the box-only guns (Wunderwaffe, Thundergun, Ray Gun, ...) have a tiny price in it.
+bo1_weapon_rank(w)
+{
 	if(w == "m1911_zm")
 		return 0;
+	r = bo1_weapon_base(w);
 	if(issubstr(w, "_upgraded"))
-		return 9000;
+	{
+		if(r < 1000)
+			r += 6000;
+		else
+			r += 8000;
+	}
+	return r;
+}
+
+bo1_weapon_base(w)
+{
+	// wonder weapons
+	if(issubstr(w, "tesla_gun"))			return 15000;	// Wunderwaffe DG-2
+	if(issubstr(w, "thundergun"))			return 14500;
+	if(issubstr(w, "ray_gun"))				return 14000;
+	if(issubstr(w, "microwavegun"))			return 13500;	// Zap Gun
+	if(issubstr(w, "freezegun"))			return 11000;	// Winter's Howl
+	if(issubstr(w, "humangun"))				return 10000;	// V-R11
+	if(issubstr(w, "china_lake"))			return 9500;
+	if(issubstr(w, "crossbow_explosive"))	return 8500;
+	if(issubstr(w, "minigun"))				return 7000;	// Death Machine
+	if(issubstr(w, "sniper_explosive"))		return 6000;	// Scavenger
+	if(issubstr(w, "m72_law"))				return 5500;
+	// LMGs / rifles
+	if(issubstr(w, "hk21") || issubstr(w, "rpk") || issubstr(w, "m60") || issubstr(w, "stoner63"))
+		return 4500;
+	if(issubstr(w, "l96a1"))				return 4000;
+	if(issubstr(w, "g11"))					return 3800;
+	if(issubstr(w, "fnfal") || issubstr(w, "galil") || issubstr(w, "famas") || issubstr(w, "ak47") || issubstr(w, "aug_acog"))
+		return 3600;
+	if(issubstr(w, "zombie_fg42"))			return 3600;
+	if(issubstr(w, "m14_zm") || issubstr(w, "m16") || issubstr(w, "dragunov"))
+		return 3500;
+	if(issubstr(w, "commando"))				return 3300;
+	if(issubstr(w, "zombie_bar"))			return 3300;
+	if(issubstr(w, "zombie_stg44"))			return 3200;
+	// shotguns
+	if(issubstr(w, "ithaca") || issubstr(w, "hs10"))
+		return 3300;
+	if(issubstr(w, "spas"))					return 3000;
+	if(issubstr(w, "rottweil72"))			return 2800;
+	if(issubstr(w, "zombie_doublebarrel") || issubstr(w, "zombie_shotgun"))
+		return 2600;
+	// SMGs and old rifles
+	if(issubstr(w, "zombie_ppsh") || issubstr(w, "zombie_thompson"))
+		return 2400;
+	if(issubstr(w, "ak74u") || issubstr(w, "mp5k") || issubstr(w, "spectre"))
+		return 2200;
+	if(issubstr(w, "mp40") || issubstr(w, "zombie_type100") || issubstr(w, "mac11") || issubstr(w, "pm63") || issubstr(w, "kiparis") || issubstr(w, "mpl_zm") || issubstr(w, "skorpion"))
+		return 1900;
+	if(issubstr(w, "zombie_m1garand") || issubstr(w, "zombie_gewehr43"))
+		return 1900;
+	if(issubstr(w, "zombie_kar98k") || issubstr(w, "zombie_springfield") || issubstr(w, "zombie_m1carbine") || issubstr(w, "zombie_type99"))
+		return 1800;
+	// pistols
+	if(issubstr(w, "cz75dw"))				return 900;
+	if(issubstr(w, "python"))				return 700;
+	if(issubstr(w, "cz75"))					return 650;
+	if(issubstr(w, "makarov"))				return 450;
+	if(issubstr(w, "knife_ballistic"))		return 1000;
+	if(issubstr(w, "m1911"))				return 0;
+	// not in the list: the game's table, but a tiny price means a box-only special, so assume a good one
 	if(isDefined(level.zombie_weapons) && isDefined(level.zombie_weapons[w]) && isDefined(level.zombie_weapons[w].cost))
-		return level.zombie_weapons[w].cost;
-	// not in the table: assume it is a good one
+	{
+		c = level.zombie_weapons[w].cost;
+		if(c < 100)
+			return 12000;
+		return c;
+	}
 	return 1500;
 }
 
@@ -2027,6 +2054,44 @@ bo1_buy_wall(e)
 }
 
 // Buy a mystery box weapon: pay, wait out the spin, grab. Press first, trigger notify as a fallback.
+// the weapon the box is showing: the script_model it spawns carries .weapon_string
+bo1_box_offer(box)
+{
+	ents = getentarray("script_model", "classname");
+	best = undefined;
+	bd = 200 * 200;
+	for(i = 0; i < ents.size; i++)
+	{
+		e = ents[i];
+		if(!isDefined(e) || !isDefined(e.weapon_string))
+			continue;
+		d = distancesquared(e.origin, box.origin);
+		if(d < bd)
+		{
+			bd = d;
+			best = e;
+		}
+	}
+	if(!isDefined(best))
+		return undefined;
+	return best.weapon_string;
+}
+
+// take it unless it is a gun that is no better than the worst one we hold (the game replaces the gun in hand)
+bo1_box_take_ok(w)
+{
+	if(!isDefined(w) || w == "")
+		return true;
+	if(!bo1_is_gun(w) || issubstr(w, "black_hole") || issubstr(w, "nesting"))
+		return true;
+	if(self hasweapon(w))
+		return false;
+	prims = self getweaponslistprimaries();
+	if(prims.size < self bo1_weapon_limit())
+		return true;
+	return bo1_weapon_rank(w) > self bo1_worst_value() + 150;
+}
+
 bo1_buy_box(box)
 {
 	cost = bo1_box_cost(box);
@@ -2072,6 +2137,7 @@ bo1_buy_box(box)
 	// the weapon cycles for a few seconds, then waits to be taken
 	self bo1_wait_fight(3.5);
 	seen = false;
+	decided = false;
 	for(i = 0; i < 12; i++)
 	{
 		if(!isAlive(self) || bo1_down(self) || !isDefined(box) || bo1_box_moving())
@@ -2083,6 +2149,26 @@ bo1_buy_box(box)
 			seen = true;
 		if(seen && !cu)
 			break;
+		if(cu && !decided)
+		{
+			// the offered weapon only counts once it stopped changing (the box cycles through guns first)
+			o1 = self bo1_box_offer(box);
+			wait 0.6;
+			o2 = self bo1_box_offer(box);
+			if(isDefined(o1) && isDefined(o2) && o1 == o2)
+			{
+				decided = true;
+				if(!self bo1_box_take_ok(o2))
+				{
+					bo1bots_dbg(self.name + " leaves the box weapon " + o2);
+					break;
+				}
+				// taking it: the game replaces the gun in hand, so hold the worst gun now (fighting during the spin may
+				// have switched away from it) and keep the automatic weapon switching off until the grab is done
+				self bo1_hold_worst();
+				self.bo1.next_switch = gettime() + 4000;
+			}
+		}
 		if(self bo1_has_new(old))
 			break;
 		if(i % 2 == 0)
@@ -2160,7 +2246,7 @@ bo1_pick_shop()
 				continue;
 			if(self hasperk(perk))
 				continue;
-			self bo1_consider(e, "perk", info[0], info[1], 1200);
+			self bo1_consider(e, "perk", info[0], info[1], bo1_perk_range());
 		}
 	}
 
@@ -2233,7 +2319,7 @@ bo1_pick_shop()
 		if(self hasweapon(w))
 			continue;
 		cost = bo1_wall_cost(e);
-		if(prims.size >= limit && cost < worst + 300)
+		if(prims.size >= limit && bo1_weapon_rank(w) < worst + 300)
 			continue;
 		if(prims.size < limit && cost < 500)
 			continue;
@@ -2298,10 +2384,19 @@ bo1_do_shop()
 				perk = shop.script_noteworthy;
 			if(isDefined(perk))
 			{
-				for(t = 0; t < 40 && !self hasperk(perk); t++)
+				// the press registered nothing: fire the machine's own trigger the way the game does for a player
+				if(!self hasperk(perk) && self.score >= before && !(isDefined(self.is_drinking) && self.is_drinking > 0))
+				{
+					shop notify("trigger", self);
+					wait 0.6;
+				}
+				// bottle animation: the perk is given when it ends
+				for(t = 0; t < 80 && !self hasperk(perk); t++)
 					wait 0.1;
 				if(self hasperk(perk))
 					self bo1_fix_cost(before, self.bo1.shop_cost);
+				else
+					bo1bots_dbg(self.name + " did not get " + perk + " (score " + before + " -> " + self.score + ")");
 			}
 			self.bo1.skip[key] = gettime() + 8000;
 			break;
@@ -2350,35 +2445,62 @@ bo1_do_revive(mate)
 
 // ---------------------------------------------------------------- powerups
 
-// nearest drop we can walk to (BO1 keeps live drops in level.active_powerups)
+// every live drop. level.active_powerups when the game keeps it, otherwise the drops themselves: script_models that
+// carry .powerup_name. Cached for 0.3s so every bot shares one scan.
+bo1_powerup_list()
+{
+	if(isDefined(level.bo1bots_pu_list) && isDefined(level.bo1bots_pu_t) && gettime() < level.bo1bots_pu_t)
+		return level.bo1bots_pu_list;
+	list = [];
+	if(isDefined(level.active_powerups))
+	{
+		for(i = 0; i < level.active_powerups.size; i++)
+		{
+			if(isDefined(level.active_powerups[i]))
+				list[list.size] = level.active_powerups[i];
+		}
+	}
+	if(list.size == 0)
+	{
+		ents = getentarray("script_model", "classname");
+		for(i = 0; i < ents.size; i++)
+		{
+			if(isDefined(ents[i]) && isDefined(ents[i].powerup_name))
+				list[list.size] = ents[i];
+		}
+	}
+	level.bo1bots_pu_list = list;
+	level.bo1bots_pu_t = gettime() + 300;
+	return list;
+}
+
+// nearest drop we can walk to (up to 1500 units; the engine pathfinding walks around walls, so no line of sight is
+// needed unless bo1_bots_nav is 0)
 bo1_find_powerup()
 {
-	if(!isDefined(level.active_powerups))
-		return undefined;
+	list = bo1_powerup_list();
 	best = undefined;
-	bd = 1000 * 1000;
+	bd = 1500 * 1500;
 	eye = self geteye();
-	for(i = 0; i < level.active_powerups.size; i++)
+	nav_off = getdvar("bo1_bots_nav") != "" && getdvarint("bo1_bots_nav") == 0;
+	for(i = 0; i < list.size; i++)
 	{
-		p = level.active_powerups[i];
+		p = list[i];
 		if(!isDefined(p) || !isDefined(p.origin))
 			continue;
 		key = "pu_" + p getentitynumber();
 		if(isDefined(self.bo1.skip[key]) && gettime() < self.bo1.skip[key])
 			continue;
-		if(abs(p.origin[2] - self.origin[2]) > 120)
+		if(abs(p.origin[2] - self.origin[2]) > 200)
 			continue;
 		d = distancesquared(self.origin, p.origin);
 		if(d >= bd)
 			continue;
-		// straight-line walking only, so only go for drops we can see
-		if(d > 150 * 150 && !sighttracepassed(eye, p.origin + (0, 0, 5), false, undefined))
+		// straight-line walking only (nav off): only go for drops we can see
+		if(nav_off && d > 150 * 150 && !sighttracepassed(eye, p.origin + (0, 0, 5), false, undefined))
 			continue;
-		if(d < bd)
-		{
-			bd = d;
-			best = p;
-		}
+		bd = d;
+		best = p;
 	}
 	return best;
 }
@@ -2839,6 +2961,34 @@ bo1bots_brain()
 			continue;
 		}
 
+		// a running trap kills: get out of it, whatever else is going on
+		tf = self bo1_trap_flee_dir();
+		if(isDefined(tf))
+		{
+			self bo1_ceasefire();
+			self.bo1.trap_block = gettime();
+			tang = vectortoangles(tf);
+			self botangles((0, tang[1], 0));
+			self bo1_move_dir_raw(tf);
+			continue;
+		}
+
+		// the game is running a drink / put-on: nothing may interrupt it (a stuck counter is let go after 12s)
+		if(isDefined(self.is_drinking) && self.is_drinking > 0)
+		{
+			if(!isDefined(self.bo1.drink_t))
+				self.bo1.drink_t = gettime();
+			if(gettime() - self.bo1.drink_t < 12000)
+			{
+				self bo1_stop();
+				self bo1_ceasefire();
+				continue;
+			}
+			self.is_drinking = 0;
+			self enableoffhandweapons();
+		}
+		self.bo1.drink_t = undefined;
+
 		sp = self bo1_find_special(450);
 		if(isDefined(sp))
 		{
@@ -2875,7 +3025,7 @@ bo1bots_brain()
 			goal_r = 50;
 		}
 
-		// 1b. power-up drop on the floor (within 1000 units and in sight). Gives up on one that it is
+		// 1b. power-up drop on the floor (within 1500 units, walked to with the pathfinding). Gives up on one that it is
 		// not getting closer to for 9s and leaves it alone for 40s, like the bo2 bots.
 		pu_goal = false;
 		pes_goal = false;
@@ -3075,7 +3225,7 @@ bo1bots_brain()
 		if(gettime() > self.bo1.sample)
 		{
 			self.bo1.sample = gettime() + 1000;
-			if(isDefined(goal) && distance(self.origin, goal) > goal_r && distance2d(self.origin, self.bo1.last_pos) < 12)
+			if(isDefined(goal) && distance(self.origin, goal) > goal_r && distance2d(self.origin, self.bo1.last_pos) < 12 && !(isDefined(self.bo1.trap_block) && gettime() - self.bo1.trap_block < 2500))
 			{
 				self.bo1.stuck++;
 				self.bo1.nav_path = undefined;
@@ -3419,6 +3569,152 @@ bo1bots_arcade_loop()
 		if(isDefined(leader) && distance(self.origin, leader.origin) > 1800 && leader isonground())
 			self bo1_teleport_to(leader);
 	}
+}
+
+// ---------------------------------------------------------------- traps
+//
+// From _zombiemode_traps.gsc: every trap is a trigger_multiple (targetname "zombie_trap") that is also its own damage zone
+// (trap_damage waits on that entity's "trigger"); it is only switched on while the trap runs and kills players (electric,
+// fire, rotating, rocket). _trap_in_use is 1 from the purchase until the cooldown ends and _trap_cooling_down is 1 during
+// the cooldown, so "in use and not cooling down" = dangerous. trap_init keeps the effect structs in ._trap_fx_structs and the
+// moving parts in ._trap_movers; their positions mark the zone.
+bo1_traps_exist()
+{
+	if(getdvar("bo1_bots_traps") != "" && getdvarint("bo1_bots_traps") == 0)
+		return false;
+	if(!isDefined(level.bo1_trap_ents))
+		level.bo1_trap_ents = getentarray("zombie_trap", "targetname");
+	return level.bo1_trap_ents.size > 0;
+}
+
+// the running traps, shared by every bot for 0.25s
+bo1_traps_active()
+{
+	if(isDefined(level.bo1_trap_list) && isDefined(level.bo1_trap_t) && gettime() < level.bo1_trap_t)
+		return level.bo1_trap_list;
+	list = [];
+	for(i = 0; i < level.bo1_trap_ents.size; i++)
+	{
+		t = level.bo1_trap_ents[i];
+		if(!isDefined(t))
+			continue;
+		if(isDefined(t._trap_in_use) && t._trap_in_use && !(isDefined(t._trap_cooling_down) && t._trap_cooling_down))
+			list[list.size] = t;
+	}
+	level.bo1_trap_list = list;
+	level.bo1_trap_t = gettime() + 250;
+	return list;
+}
+
+// is pos inside the zone of one of these traps (zone = near an effect struct or a mover; the trigger origin if it has neither)
+bo1_trap_danger(pos, traps)
+{
+	for(i = 0; i < traps.size; i++)
+	{
+		t = traps[i];
+		n = 0;
+		if(isDefined(t._trap_fx_structs))
+		{
+			for(j = 0; j < t._trap_fx_structs.size; j++)
+			{
+				s = t._trap_fx_structs[j];
+				n++;
+				if(distance2d(pos, s.origin) < 120 && abs(pos[2] - s.origin[2]) < 130)
+					return true;
+			}
+		}
+		if(isDefined(t._trap_movers))
+		{
+			for(j = 0; j < t._trap_movers.size; j++)
+			{
+				if(!isDefined(t._trap_movers[j]))
+					continue;
+				n++;
+				if(distance2d(pos, t._trap_movers[j].origin) < 280 && abs(pos[2] - t._trap_movers[j].origin[2]) < 130)
+					return true;
+			}
+		}
+		if(n == 0 && distance2d(pos, t.origin) < 300 && abs(pos[2] - t.origin[2]) < 150)
+			return true;
+	}
+	return false;
+}
+
+// undefined when the bot is safe, otherwise the direction out of the running trap it is standing in
+bo1_trap_flee_dir()
+{
+	if(!bo1_traps_exist())
+		return undefined;
+	traps = bo1_traps_active();
+	if(traps.size == 0)
+		return undefined;
+	inside = false;
+	for(i = 0; i < traps.size; i++)
+	{
+		if(self istouching(traps[i]))
+			inside = true;
+	}
+	if(!inside && !bo1_trap_danger(self.origin, traps))
+		return undefined;
+	away = (0, 0, 0);
+	for(i = 0; i < traps.size; i++)
+	{
+		pts = [];
+		if(isDefined(traps[i]._trap_fx_structs))
+		{
+			for(j = 0; j < traps[i]._trap_fx_structs.size; j++)
+				pts[pts.size] = traps[i]._trap_fx_structs[j].origin;
+		}
+		if(isDefined(traps[i]._trap_movers))
+		{
+			for(j = 0; j < traps[i]._trap_movers.size; j++)
+			{
+				if(isDefined(traps[i]._trap_movers[j]))
+					pts[pts.size] = traps[i]._trap_movers[j].origin;
+			}
+		}
+		if(pts.size == 0)
+			pts[0] = traps[i].origin;
+		for(j = 0; j < pts.size; j++)
+		{
+			v = (self.origin[0] - pts[j][0], self.origin[1] - pts[j][1], 0);
+			l = distance2d(self.origin, pts[j]);
+			if(l < 1 || l > 450)
+				continue;
+			away = away + vectornormalize(v) * (450 - l);
+		}
+	}
+	if(lengthsquared(away) < 1)
+		away = (self.origin[0] - traps[0].origin[0], self.origin[1] - traps[0].origin[1], 0);
+	return (away[0], away[1], 0);
+}
+
+// true when walking along dir would take the bot into a running trap (it then waits at the edge, 60s at most)
+bo1_trap_blocks(dir)
+{
+	if(!bo1_traps_exist())
+		return false;
+	traps = bo1_traps_active();
+	if(traps.size == 0)
+	{
+		self.bo1.trap_since = undefined;
+		return false;
+	}
+	// already inside: the flee logic in the brain moves it out, don't hold it here
+	if(bo1_trap_danger(self.origin, traps))
+		return false;
+	n = vectornormalize((dir[0], dir[1], 0));
+	if(!bo1_trap_danger(self.origin + n * 60, traps) && !bo1_trap_danger(self.origin + n * 110, traps))
+	{
+		self.bo1.trap_since = undefined;
+		return false;
+	}
+	if(!isDefined(self.bo1.trap_since))
+		self.bo1.trap_since = gettime();
+	if(gettime() - self.bo1.trap_since > 60000)
+		return false;
+	self.bo1.trap_block = gettime();
+	return true;
 }
 
 // ---------------------------------------------------------------- Moon: P.E.S. (space suit)

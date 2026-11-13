@@ -4073,20 +4073,18 @@ bo1bots_brain()
 		goal_r = 80;
 
 		// 1. revive somebody (unless a zombie is on top of us)
+		// This works the same with wander on: wandering only replaces "follow the player", reviving always comes first.
 		mate = self bo1_find_downed();
-		if(isDefined(mate) && !self bo1_any_zombie_near(160))
+		revive_ok = isDefined(mate) && !self bo1_any_zombie_near(160);
+		if(revive_ok && distance2d(self.origin, mate.origin) < 110)
 		{
-			if(distance2d(self.origin, mate.origin) < 110)
-			{
-				self bo1_do_revive(mate);
-				continue;
-			}
-			goal = mate.origin;
-			goal_r = 50;
+			self bo1_do_revive(mate);
+			continue;
 		}
 
-		// 1-rec. wander mode: getting unstuck by walking back along a known path (never teleports)
-		if(!isDefined(goal) && isDefined(self.bo1.rec_mode))
+		// 1-rec. wander mode: getting unstuck by walking back along a known path (never teleports). It goes before the
+		// walk to a downed player so a bot that got stuck on the way there can actually get out and try again.
+		if(isDefined(self.bo1.rec_mode))
 		{
 			rg = self bo1_recover_goal();
 			if(isDefined(rg))
@@ -4094,6 +4092,13 @@ bo1bots_brain()
 				goal = rg;
 				goal_r = 40;
 			}
+		}
+
+		if(revive_ok && !isDefined(goal))
+		{
+			goal = mate.origin;
+			goal_r = 50;
+			self.bo1.rev_goal_t = gettime();
 		}
 
 		// 1a. George Romero is enraged and chasing us: lead him into the water, it calms him down
@@ -4335,7 +4340,11 @@ bo1bots_brain()
 					{
 						self.bo1.stuck = 0;
 						self.bo1.shop = undefined;
-						self bo1_recover_start();
+						// stuck on the way to a downed player: the path a player walked is the best bet to get there
+						if(isDefined(self.bo1.rev_goal_t) && gettime() - self.bo1.rev_goal_t < 1500 && self bo1_recover_player())
+							bo1bots_dbg(self.name + " stuck on the way to a downed player");
+						else
+							self bo1_recover_start();
 					}
 				}
 				else if(self.bo1.stuck >= 4 && isDefined(leader))

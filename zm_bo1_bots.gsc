@@ -1038,7 +1038,7 @@ bo1_any_zombie_near(r)
 
 // ---------------------------------------------------------------- special enemies
 
-// Moon astronaut: huge health, grabs and steals perks. Never shoot it, keep away.
+// Moon astronaut: huge health, grabs and steals perks. Never shoot it, keep away (bo1_bots_special_avoid = radius, default 100, 0 = off).
 // Detected by name; if the names don't match, set  ent.bot_special = "astro";  where it spawns.
 bo1_is_special(z)
 {
@@ -1187,14 +1187,14 @@ bo1_george_blocks(from, to)
 }
 
 // undefined = no need to avoid him, otherwise the direction away from George.
-// bo1_bots_george_avoid = radius in units (default 300, 0 = off). Not done while this bot is the one leading an
+// bo1_bots_george_avoid = radius in units (default 100, 0 = off). Not done while this bot is the one leading an
 // enraged George to the water (that job comes first), when he is leaving / entering / dead, or when he is nearly dead.
 bo1_george_avoid_dir()
 {
 	g = bo1_find_george();
 	if(!isDefined(g))
 		return undefined;
-	r = 300;
+	r = 100;
 	if(getdvar("bo1_bots_george_avoid") != "")
 		r = getdvarint("bo1_bots_george_avoid");
 	if(r <= 0)
@@ -4027,7 +4027,12 @@ bo1bots_brain()
 		}
 		self.bo1.drink_t = undefined;
 
-		sp = self bo1_find_special(450);
+		spr = 100;
+		if(getdvar("bo1_bots_special_avoid") != "")
+			spr = getdvarint("bo1_bots_special_avoid");
+		sp = undefined;
+		if(spr > 0)
+			sp = self bo1_find_special(spr);
 		if(isDefined(sp))
 		{
 			// back away from the astronaut, still shooting other zombies that are not behind him

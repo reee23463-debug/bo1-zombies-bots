@@ -2914,8 +2914,11 @@ bo1_pick_shop()
 		}
 	}
 
-	// doors / debris: only when a human is nearby, and not more often than every 15s across all bots
-	leader = self bo1_leader();
+	// doors / debris: not more often than every 15s across all bots
+	// bo1_bots_door_range = how far a bot will go to a door (default 2000)
+	door_r = 2000;
+	if(getdvar("bo1_bots_door_range") != "")
+		door_r = getdvarint("bo1_bots_door_range");
 	if(gettime() > level.bo1bots_last_door + 15000)
 	{
 		for(n = 0; n < 2; n++)
@@ -2933,9 +2936,7 @@ bo1_pick_shop()
 					continue;
 				if(isDefined(e.has_been_opened) && e.has_been_opened)
 					continue;
-				if(isDefined(leader) && distance2d(leader.origin, e.origin) > 900)
-					continue;
-				self bo1_consider(e, "door", 40, e.zombie_cost, 700);
+				self bo1_consider(e, "door", 40, e.zombie_cost, door_r);
 			}
 		}
 	}

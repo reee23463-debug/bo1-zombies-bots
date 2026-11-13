@@ -14,7 +14,7 @@ Bots buy perks (they start with Juggernog), wall weapons, the mystery box and Pa
 1. Download `zm_bo1_bots.gsc`.
 2. Put it in:
    `%localappdata%\Plutonium\storage\t5\scripts\`
-3. (Optional) Download `bots.txt` and put it in `%localappdata%\Plutonium\storage\t5` (this simply gives the bots random names)
+3. (Optional) Download `bots.txt` and put it in `%localappdata%\Plutonium\storage\t5` (this simply gives the bots random names and you can easily change it by editing it in notepad)
 4. Start a Zombies game. Bots join a few seconds after the round starts.
 
 To remove it, delete the file.

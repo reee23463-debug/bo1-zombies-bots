@@ -48,17 +48,28 @@ bo1bots_start()
 {
 	level endon("end_game");
 
+	hc_t = undefined;
 	for(;;)
 	{
 		wait 0.25;
-		// Dead Ops Arcade has no round_number
-		if(!isDefined(level.round_number) && !bo1_is_arcade())
-			continue;
 		// Round 1 fix: don't wait for the human to be fully spawned in, a human that is merely connected is enough.
 		// Waiting for "alive" + a delay + 1.5s per bot let round 1 start first, and a player who connects after the
 		// round has begun sits as a spectator until the next round.
-		if(bo1bots_humans_connected() > 0)
-			break;
+		if(bo1bots_humans_connected() <= 0)
+			continue;
+		// Dead Ops Arcade has no round_number
+		if(!isDefined(level.round_number) && !bo1_is_arcade())
+		{
+			// fast_restart: the game sits on "waiting for players" because it expects the bots that were here before the
+			// restart, and it only sets round_number after they are in. Waiting for round_number here would be a deadlock:
+			// the bots wait for the game, the game waits for the bots. So give it 2s and add the bots anyway.
+			if(!isDefined(hc_t))
+				hc_t = gettime();
+			if(gettime() - hc_t < 2000)
+				continue;
+			bo1bots_dbg("no round_number yet, adding bots anyway (fast_restart?)");
+		}
+		break;
 	}
 	// bo1_bots_join_delay = seconds to wait after the first human connects (default 0.25)
 	jd = 0.25;
@@ -110,6 +121,7 @@ bo1bots_start()
 	{
 		level thread bo1bots_lure();
 		level thread bo1bots_water_watch();
+		level thread bo1bots_trail_players();
 	}
 }
 
@@ -996,6 +1008,9 @@ bo1_find_target()
 			continue;
 		if(!sighttracepassed(eye, bo1_aimpos(z), false, undefined))
 			continue;
+		// George standing between us and this zombie: the shots would hit him, hold fire
+		if(bo1_george_blocks(eye, bo1_aimpos(z)))
+			continue;
 		bd = sc;
 		best = z;
 	}
@@ -1130,6 +1145,66 @@ bo1_george_enraged(g)
 	return bo1_flag(g.is_activated);
 }
 
+// the health percent at or below which the bots finally go for George (bo1_bots_george_hp, default 5)
+bo1_george_hp_lim()
+{
+	lim = 5;
+	if(getdvar("bo1_bots_george_hp") != "")
+		lim = getdvarint("bo1_bots_george_hp");
+	return lim;
+}
+
+// true when George (not nearly dead) is on the line from -> to, closer than the end point: a shot would hit him.
+// bo1_bots_george_los 0 turns this off.
+bo1_george_blocks(from, to)
+{
+	if(getdvar("bo1_bots_george_los") != "" && getdvarint("bo1_bots_george_los") == 0)
+		return false;
+	g = bo1_find_george();
+	if(!isDefined(g))
+		return false;
+	// nearly dead: he is a valid target, nothing to protect
+	if(bo1_george_hp_pct(g) <= bo1_george_hp_lim())
+		return false;
+	c = g.origin + (0, 0, 50);
+	seg = to - from;
+	l2 = lengthsquared(seg);
+	if(l2 < 1)
+		return false;
+	t = vectordot(c - from, seg) / l2;
+	if(t <= 0 || t >= 1)
+		return false;
+	p = from + seg * t;
+	return distance(p, c) < 90;
+}
+
+// undefined = no need to avoid him, otherwise the direction away from George.
+// bo1_bots_george_avoid = radius in units (default 300, 0 = off). Not done while this bot is the one leading an
+// enraged George to the water (that job comes first), when he is leaving / entering / dead, or when he is nearly dead.
+bo1_george_avoid_dir()
+{
+	g = bo1_find_george();
+	if(!isDefined(g))
+		return undefined;
+	r = 300;
+	if(getdvar("bo1_bots_george_avoid") != "")
+		r = getdvarint("bo1_bots_george_avoid");
+	if(r <= 0)
+		return undefined;
+	if(bo1_flag(g.defeated) || bo1_flag(g.leaving_level) || bo1_flag(g.entering_level))
+		return undefined;
+	if(bo1_george_hp_pct(g) <= bo1_george_hp_lim())
+		return undefined;
+	if(distance2d(self.origin, g.origin) > r || abs(self.origin[2] - g.origin[2]) > 150)
+		return undefined;
+	if(isDefined(self bo1_george_water_goal()))
+		return undefined;
+	away = (self.origin[0] - g.origin[0], self.origin[1] - g.origin[1], 0);
+	if(lengthsquared(away) < 1)
+		away = (randomfloatrange(-1, 1), randomfloatrange(-1, 1), 0);
+	return away;
+}
+
 // "x y z;x y z" -> origins
 bo1_george_parse_spots(s)
 {
@@ -1249,6 +1324,41 @@ bo1_water_learn()
 	}
 }
 
+// a water spot this bot already reached while George was still dry (skipped for 12s)
+bo1_george_done(org)
+{
+	if(!isDefined(self.bo1.gd_org))
+		return false;
+	for(i = 0; i < self.bo1.gd_org.size; i++)
+	{
+		if(gettime() < self.bo1.gd_t[i] && distance(self.bo1.gd_org[i], org) < 100)
+			return true;
+	}
+	return false;
+}
+
+bo1_george_mark(org)
+{
+	if(!isDefined(self.bo1.gd_org) || self.bo1.gd_org.size > 12)
+	{
+		self.bo1.gd_org = [];
+		self.bo1.gd_t = [];
+	}
+	n = self.bo1.gd_org.size;
+	self.bo1.gd_org[n] = org;
+	self.bo1.gd_t[n] = gettime() + 12000;
+	self.bo1.gd_last = org;
+}
+
+// a point 250 units past org, on the far side from George
+bo1_george_beyond(org, g)
+{
+	away = (org[0] - g.origin[0], org[1] - g.origin[1], 0);
+	if(lengthsquared(away) < 1)
+		away = (randomfloatrange(-1, 1), randomfloatrange(-1, 1), 0);
+	return org + vectornormalize(away) * 250;
+}
+
 // where this bot should run to lead an enraged George into the water, or undefined
 bo1_george_water_goal()
 {
@@ -1290,17 +1400,39 @@ bo1_george_water_goal()
 		}
 		return undefined;
 	}
+	// nearest water spot we haven't already reached with George still dry. First try only spots that don't lead back
+	// toward George, then any spot.
+	gd = distance(g.origin, self.origin);
 	best = undefined;
-	bd = 99999999;
-	for(i = 0; i < level.bo1_water.size; i++)
+	for(pass = 0; pass < 2 && !isDefined(best); pass++)
 	{
-		d = distancesquared(self.origin, level.bo1_water[i]);
-		if(d < bd)
+		bd = 99999999;
+		for(i = 0; i < level.bo1_water.size; i++)
 		{
-			bd = d;
-			best = level.bo1_water[i];
+			w = level.bo1_water[i];
+			if(self bo1_george_done(w))
+				continue;
+			if(pass == 0 && distance(g.origin, w) < gd - 50)
+				continue;
+			d = distancesquared(self.origin, w);
+			if(d < bd)
+			{
+				bd = d;
+				best = w;
+			}
 		}
 	}
+
+	// Got to the spot and George is not in the water yet: don't stop there, run on past it (away from George)
+	// so he follows into the water. The spot is skipped for 12s.
+	if(isDefined(best) && distance2d(self.origin, best) < 60)
+	{
+		self bo1_george_mark(best);
+		best = bo1_george_beyond(best, g);
+		bo1bots_dbg(self.name + " reached the water but George is dry, running past it");
+	}
+	else if(!isDefined(best) && isDefined(self.bo1.gd_last))
+		best = bo1_george_beyond(self.bo1.gd_last, g);
 	if(!isDefined(best))
 		return undefined;
 	gp = groundpos(best + (0, 0, 64));
@@ -3316,6 +3448,11 @@ bo1_throw_think(z)
 		self.bo1.next_throw = 0;
 	if(gettime() < self.bo1.next_throw)
 		return;
+
+	// no grenades / monkeys / bettys near George
+	gg = bo1_find_george();
+	if(isDefined(gg) && bo1_george_hp_pct(gg) > bo1_george_hp_lim() && distance(gg.origin, z.origin) < 350)
+		return;
 	
 	zd = distance(self.origin, z.origin);
 	group = bo1_count_zombies(z.origin, 220);
@@ -3350,6 +3487,437 @@ bo1_throw_think(z)
 	}
 }
 
+// ---------------------------------------------------------------- wander mode
+//
+// bo1_bots_wander 1 (default 0 = off): the bots stop following the player. They pick spots around them and walk there,
+// pause, and pick another one. Shopping, power-ups, window repair, reviving and fighting still work as usual.
+//   bo1_bots_wander_follow  % chance that a new destination is "go to the player" instead (default 10)
+//   bo1_bots_wander_back    crumbs to walk back when stuck (default 15, about 70 units each)
+// A wandering bot NEVER teleports to the player. When it is stuck it:
+//   1. walks back along the exact trail it walked to get there (its own breadcrumbs, newest first, point to point)
+//   2. if that doesn't free it, copies the path the player walked: finds the player's breadcrumb nearest to the bot
+//      (only if the player was ever there) and walks the player's trail from there on
+//   3. if neither works it gives up for 10s, picks a different destination and keeps wandering
+// Breadcrumbs are recorded every 0.4s whenever a walker has moved 70+ units; a jump of 350+ (teleporter, fall,
+// setorigin) wipes that walker's trail, since the old trail no longer leads to where it is.
+
+bo1_wander_on()
+{
+	return getdvar("bo1_bots_wander") != "" && getdvarint("bo1_bots_wander") != 0;
+}
+
+// breadcrumbs of every human, for the "copy the player's path" step
+bo1bots_trail_players()
+{
+	level endon("end_game");
+	for(;;)
+	{
+		wait 0.4;
+		players = get_players();
+		for(i = 0; i < players.size; i++)
+		{
+			p = players[i];
+			if(!isDefined(p) || isDefined(p.bo1) || !isAlive(p))
+				continue;
+			if(!isDefined(p.sessionstate) || p.sessionstate != "playing" || bo1_down(p) || !p isonground())
+				continue;
+			if(!isDefined(p.bo1p_trail))
+				p.bo1p_trail = [];
+			n = p.bo1p_trail.size;
+			if(n > 0)
+			{
+				d = distance(p.origin, p.bo1p_trail[n - 1]);
+				if(d < 70)
+					continue;
+				if(d > 350)
+				{
+					p.bo1p_trail = [];
+					n = 0;
+				}
+			}
+			p.bo1p_trail[n] = p.origin;
+			if(p.bo1p_trail.size > 500)
+				p.bo1p_trail = bo1_trail_cut(p.bo1p_trail, 100);
+		}
+	}
+}
+
+// the same trail without its oldest "drop" crumbs
+bo1_trail_cut(t, drop)
+{
+	out = [];
+	for(i = drop; i < t.size; i++)
+		out[out.size] = t[i];
+	return out;
+}
+
+// this bot's own breadcrumbs (newest at the end)
+bo1bots_trail_self()
+{
+	self endon("disconnect");
+	self endon("bo1bots_brain");
+	for(;;)
+	{
+		wait 0.4;
+		// not while retracing (those crumbs are already in the trail), downed or in the air
+		if(isDefined(self.bo1.rec_mode) || !isAlive(self) || self.sessionstate != "playing" || bo1_down(self) || !self isonground())
+			continue;
+		n = self.bo1.trail.size;
+		if(n == 0)
+		{
+			self.bo1.trail[0] = self.origin;
+			continue;
+		}
+		d = distance(self.origin, self.bo1.trail[n - 1]);
+		if(d < 70)
+			continue;
+		if(d > 350)
+		{
+			self.bo1.trail = [];
+			n = 0;
+		}
+		self.bo1.trail[n] = self.origin;
+		if(self.bo1.trail.size > 300)
+			self.bo1.trail = bo1_trail_cut(self.bo1.trail, 100);
+	}
+}
+
+// has this bot just failed to get to somewhere near pos? Wander destinations that got it stuck are avoided for a while.
+bo1_wander_bad(pos)
+{
+	if(!isDefined(self.bo1.wander_bad))
+		return false;
+	for(i = 0; i < self.bo1.wander_bad.size; i++)
+	{
+		if(distance2d(self.bo1.wander_bad[i], pos) < 250)
+			return true;
+	}
+	return false;
+}
+
+bo1_wander_mark_bad(pos)
+{
+	if(!isDefined(pos))
+		return;
+	if(!isDefined(self.bo1.wander_bad) || self.bo1.wander_bad.size >= 6)
+		self.bo1.wander_bad = [];
+	self.bo1.wander_bad[self.bo1.wander_bad.size] = pos;
+}
+
+// Where this bot walks to while wandering, or undefined while it is pausing between trips. Called from the brain
+// when it has nothing else to do.
+bo1_wander_goal(leader)
+{
+	b = self.bo1;
+	if(isDefined(b.wander_pos))
+	{
+		done = gettime() > b.wander_t;
+		if(isDefined(b.wander_lead) && b.wander_lead)
+		{
+			// going to the player: aim at where they are now, stop once close
+			if(!isDefined(leader) || distance2d(self.origin, leader.origin) < 300)
+				done = true;
+			else
+				b.wander_pos = leader.origin;
+		}
+		else if(distance2d(self.origin, b.wander_pos) < 70)
+			done = true;
+		if(!done)
+			return b.wander_pos;
+		b.wander_pos = undefined;
+		b.wander_pause = gettime() + 1000 + randomint(3000);
+		return undefined;
+	}
+	if(isDefined(b.wander_pause) && gettime() < b.wander_pause)
+		return undefined;
+
+	b.wander_lead = false;
+	fol = 10;
+	if(getdvar("bo1_bots_wander_follow") != "")
+		fol = getdvarint("bo1_bots_wander_follow");
+	if(isDefined(leader) && randomint(100) < fol)
+	{
+		b.wander_lead = true;
+		b.wander_pos = leader.origin;
+		b.wander_t = gettime() + 20000;
+		return b.wander_pos;
+	}
+
+	eye = self geteye();
+	for(k = 0; k < 8; k++)
+	{
+		a = randomint(360);
+		dist = 300 + randomint(600);
+		cand = self.origin + anglestoforward((0, a, 0)) * dist;
+		g = groundpos(cand + (0, 0, 60));
+		if(!isDefined(g) || abs(g[2] - self.origin[2]) > 60)
+			continue;
+		if(!sighttracepassed(eye, g + (0, 0, 50), false, undefined))
+			continue;
+		if(self bo1_wander_bad(g))
+			continue;
+		b.wander_pos = g;
+		b.wander_t = gettime() + 12000;
+		return g;
+	}
+	b.wander_pause = gettime() + 2000;
+	return undefined;
+}
+
+// Stuck in wander mode: start walking back along the bot's own trail, newest crumb first.
+bo1_recover_start()
+{
+	b = self.bo1;
+	// the place it was heading for is a bad one
+	self bo1_wander_mark_bad(b.wander_pos);
+	b.wander_pos = undefined;
+	b.wander_pause = gettime() + 500;
+	b.nav_path = undefined;
+	b.nav_next = 0;
+
+	if(isDefined(b.rec_cool) && gettime() < b.rec_cool)
+	{
+		self thread bo1_jump();
+		return;
+	}
+
+	back = 15;
+	if(getdvar("bo1_bots_wander_back") != "")
+		back = getdvarint("bo1_bots_wander_back");
+	if(back < 3)
+		back = 3;
+	if(isDefined(b.trail) && b.trail.size >= 2)
+	{
+		path = [];
+		for(i = b.trail.size - 1; i >= 0 && path.size < back; i--)
+			path[path.size] = b.trail[i];
+		b.rec_path = path;
+		b.rec_i = 0;
+		b.rec_mode = "own";
+		b.rec_t = gettime();
+		bo1bots_dbg(self.name + " stuck: walking back its own trail (" + path.size + " crumbs)");
+		return;
+	}
+	if(self bo1_recover_player())
+		return;
+	bo1bots_dbg(self.name + " stuck, no trail and the player was never here: giving up for now");
+	b.rec_cool = gettime() + 10000;
+	self thread bo1_jump();
+}
+
+// Copy the player's path: the nearest breadcrumb of any human to this bot (same floor, within 250 units), then the
+// human's trail from there to where they are now. false = no human was ever near this spot.
+bo1_recover_player()
+{
+	b = self.bo1;
+	best = undefined;
+	bi = -1;
+	bd = 250;
+	players = get_players();
+	for(i = 0; i < players.size; i++)
+	{
+		p = players[i];
+		if(!isDefined(p) || isDefined(p.bo1) || !isDefined(p.bo1p_trail))
+			continue;
+		for(j = 0; j < p.bo1p_trail.size - 1; j++)
+		{
+			c = p.bo1p_trail[j];
+			if(abs(c[2] - self.origin[2]) > 80)
+				continue;
+			d = distance2d(self.origin, c);
+			if(d < bd)
+			{
+				bd = d;
+				best = p;
+				bi = j;
+			}
+		}
+	}
+	if(!isDefined(best) || bi < 0)
+		return false;
+	path = [];
+	for(j = bi + 1; j < best.bo1p_trail.size && path.size < 80; j++)
+		path[path.size] = best.bo1p_trail[j];
+	if(path.size == 0)
+		return false;
+	b.rec_path = path;
+	b.rec_i = 0;
+	b.rec_mode = "player";
+	b.rec_t = gettime();
+	bo1bots_dbg(self.name + " stuck: copying " + best.name + "'s path (" + path.size + " crumbs)");
+	return true;
+}
+
+// The retrace didn't free the bot (still stuck on it): own trail -> player's path -> give up. Never a teleport.
+bo1_recover_escalate()
+{
+	b = self.bo1;
+	if(isDefined(b.rec_mode) && b.rec_mode == "own")
+	{
+		bo1bots_dbg(self.name + " retrace didn't work, trying the player's path");
+		b.rec_mode = undefined;
+		b.rec_path = undefined;
+		if(self bo1_recover_player())
+			return;
+	}
+	bo1bots_dbg(self.name + " couldn't get unstuck by walking, giving up for now (no teleport)");
+	b.rec_mode = undefined;
+	b.rec_path = undefined;
+	b.rec_cool = gettime() + 10000;
+	b.wander_pos = undefined;
+	b.wander_pause = gettime() + 2000;
+	b.nav_path = undefined;
+	b.nav_next = 0;
+	self thread bo1_jump();
+}
+
+// the point the bot walks to next while recovering, or undefined when the path is done
+bo1_recover_goal()
+{
+	b = self.bo1;
+	if(!isDefined(b.rec_mode) || !isDefined(b.rec_path))
+		return undefined;
+	if(gettime() - b.rec_t > 40000)
+	{
+		self bo1_recover_end();
+		return undefined;
+	}
+	while(b.rec_i < b.rec_path.size)
+	{
+		c = b.rec_path[b.rec_i];
+		if(distance2d(self.origin, c) < 50 && abs(self.origin[2] - c[2]) < 70)
+		{
+			b.rec_i++;
+			continue;
+		}
+		return c;
+	}
+	self bo1_recover_end();
+	return undefined;
+}
+
+// walked the whole path: forget the crumbs just walked and carry on wandering
+bo1_recover_end()
+{
+	b = self.bo1;
+	m = b.rec_mode;
+	if(isDefined(m) && m == "own" && isDefined(b.rec_path) && isDefined(b.trail))
+	{
+		keep = [];
+		n = b.trail.size - b.rec_path.size;
+		for(i = 0; i < n; i++)
+			keep[i] = b.trail[i];
+		b.trail = keep;
+	}
+	else
+		b.trail = [];
+	b.rec_mode = undefined;
+	b.rec_path = undefined;
+	b.wander_pos = undefined;
+	b.wander_pause = gettime() + 1500;
+	b.stuck = 0;
+	b.nav_path = undefined;
+	b.nav_next = 0;
+	bo1bots_dbg(self.name + " finished walking the recovery path");
+}
+
+// ---------------------------------------------------------------- V-R11 (humangun_zm): friendly fire
+//
+// A bot holding a V-R11 (humangun_zm or the upgraded one) sometimes shoots a teammate with it. One roll per opportunity
+// (a teammate in clear sight, 150-1000 units away, no zombie close), at most one roll every 10s, 30% to go through.
+// After a bot has done it, it won't do it again for 90s.
+//   bo1_bots_vr11_teamshoot 0 = off, bo1_bots_vr11_chance (30), bo1_bots_vr11_cd (90, seconds)
+
+bo1_find_vr11()
+{
+	prims = self getweaponslistprimaries();
+	for(i = 0; i < prims.size; i++)
+	{
+		if(issubstr(prims[i], "humangun"))
+			return prims[i];
+	}
+	return undefined;
+}
+
+// a random teammate (human or bot) that is up and in clear sight
+bo1_vr11_victim()
+{
+	eye = self geteye();
+	list = [];
+	players = get_players();
+	for(i = 0; i < players.size; i++)
+	{
+		q = players[i];
+		if(q == self || !isDefined(q) || !isAlive(q) || bo1_down(q))
+			continue;
+		if(!isDefined(q.sessionstate) || q.sessionstate != "playing")
+			continue;
+		d = distance(self.origin, q.origin);
+		if(d < 150 || d > 1000)
+			continue;
+		if(!sighttracepassed(eye, q.origin + (0, 0, 50), false, undefined))
+			continue;
+		list[list.size] = q;
+	}
+	if(list.size == 0)
+		return undefined;
+	return list[randomint(list.size)];
+}
+
+// true if it did the shot this tick (the brain then skips the rest of the tick)
+bo1_vr11_try()
+{
+	if(getdvar("bo1_bots_vr11_teamshoot") != "" && getdvarint("bo1_bots_vr11_teamshoot") == 0)
+		return false;
+	b = self.bo1;
+	if(!isDefined(b.vr11_cd))
+		b.vr11_cd = 0;
+	if(!isDefined(b.vr11_roll))
+		b.vr11_roll = 0;
+	if(gettime() < b.vr11_cd || gettime() < b.vr11_roll)
+		return false;
+	if(bo1_knife_only() || bo1_down(self) || self bo1_any_zombie_near(300))
+		return false;
+	w = self bo1_find_vr11();
+	if(!isDefined(w) || self getweaponammoclip(w) <= 0)
+		return false;
+	q = self bo1_vr11_victim();
+	if(!isDefined(q))
+		return false;
+
+	// this is the one roll for this opportunity
+	b.vr11_roll = gettime() + 10000;
+	chance = 30;
+	if(getdvar("bo1_bots_vr11_chance") != "")
+		chance = getdvarint("bo1_bots_vr11_chance");
+	if(randomint(100) >= chance)
+		return false;
+	cd = 90;
+	if(getdvar("bo1_bots_vr11_cd") != "")
+		cd = getdvarint("bo1_bots_vr11_cd");
+	b.vr11_cd = gettime() + cd * 1000;
+
+	bo1bots_dbg(self.name + " shoots " + q.name + " with the V-R11");
+	self bo1_ceasefire();
+	self bo1_stop();
+	if(self getcurrentweapon() != w)
+	{
+		self switchtoweapon(w);
+		wait 1;
+	}
+	if(isDefined(q) && isAlive(q))
+	{
+		self bo1_face(q.origin + (0, 0, 50));
+		wait 0.3;
+		self bo1_on("attack");
+		wait 0.25;
+		self bo1_off("attack");
+		wait 0.4;
+	}
+	self bo1_hold_best();
+	return true;
+}
+
 // ---------------------------------------------------------------- brain
 
 bo1bots_brain()
@@ -3380,6 +3948,13 @@ bo1bots_brain()
 		self bo1bots_arcade_loop();
 		return;
 	}
+
+	// wander mode bookkeeping: the trail of where this bot has walked, and the recovery state (see bo1_wander_on)
+	self.bo1.trail = [];
+	self.bo1.rec_mode = undefined;
+	self.bo1.rec_path = undefined;
+	self.bo1.wander_pos = undefined;
+	self thread bo1bots_trail_self();
 
 	for(;;)
 	{
@@ -3447,8 +4022,34 @@ bo1bots_brain()
 		sp = self bo1_find_special(450);
 		if(isDefined(sp))
 		{
-			self bo1_ceasefire();
+			// back away from the astronaut, still shooting other zombies that are not behind him
+			sz = self bo1_find_target();
+			if(isDefined(sz))
+			{
+				self bo1_watch_zombie(sz);
+				self bo1_face(bo1_aimpos(sz));
+				self bo1_shoot(sz, distance(self.origin, sz.origin));
+			}
+			else
+				self bo1_ceasefire();
 			self bo1_move_dir(self.origin - sp.origin);
+			continue;
+		}
+
+		// George Romero too close: back away from him (still shooting other zombies that are not behind him)
+		gv = self bo1_george_avoid_dir();
+		if(isDefined(gv))
+		{
+			tz = self bo1_find_target();
+			if(isDefined(tz))
+			{
+				self bo1_watch_zombie(tz);
+				self bo1_face(bo1_aimpos(tz));
+				self bo1_shoot(tz, distance(self.origin, tz.origin));
+			}
+			else
+				self bo1_ceasefire();
+			self bo1_move_dir(gv);
 			continue;
 		}
 
@@ -3459,6 +4060,10 @@ bo1bots_brain()
 			self bo1_nml_tick(pad);
 			continue;
 		}
+
+		// holding a V-R11: now and then it shoots a teammate with it
+		if(self bo1_vr11_try())
+			continue;
 
 		z = self bo1_find_target();
 		if(isDefined(z))
@@ -3478,6 +4083,17 @@ bo1bots_brain()
 			}
 			goal = mate.origin;
 			goal_r = 50;
+		}
+
+		// 1-rec. wander mode: getting unstuck by walking back along a known path (never teleports)
+		if(!isDefined(goal) && isDefined(self.bo1.rec_mode))
+		{
+			rg = self bo1_recover_goal();
+			if(isDefined(rg))
+			{
+				goal = rg;
+				goal_r = 40;
+			}
 		}
 
 		// 1a. George Romero is enraged and chasing us: lead him into the water, it calms him down
@@ -3620,8 +4236,14 @@ bo1bots_brain()
 				self.bo1.board = undefined;
 		}
 
+		// 3. wander (bo1_bots_wander 1): mostly go off on their own, no following, no teleporting to the player
+		if(!isDefined(goal) && bo1_wander_on())
+		{
+			goal = self bo1_wander_goal(leader);
+			goal_r = 70;
+		}
 		// 3. follow
-		if(!isDefined(goal) && isDefined(leader))
+		else if(!isDefined(goal) && isDefined(leader))
 		{
 			d = distance(self.origin, leader.origin);
 			if(d > 1800 && leader isonground())
@@ -3701,7 +4323,22 @@ bo1bots_brain()
 				self.bo1.nav_path = undefined;
 				self.bo1.nav_next = 0;
 				self thread bo1_jump();
-				if(self.bo1.stuck >= 4 && isDefined(leader))
+				if(bo1_wander_on())
+				{
+					// wander mode never teleports: retrace the way we came, then the player's path (see bo1_recover_*)
+					if(isDefined(self.bo1.rec_mode) && self.bo1.stuck >= 3)
+					{
+						self.bo1.stuck = 0;
+						self bo1_recover_escalate();
+					}
+					else if(!isDefined(self.bo1.rec_mode) && self.bo1.stuck >= 4)
+					{
+						self.bo1.stuck = 0;
+						self.bo1.shop = undefined;
+						self bo1_recover_start();
+					}
+				}
+				else if(self.bo1.stuck >= 4 && isDefined(leader))
 				{
 					self.bo1.stuck = 0;
 					self.bo1.shop = undefined;
@@ -4471,6 +5108,9 @@ bo1_nml_tick(pad)
 bo1_nav_point(goal)
 {
 	if(getdvar("bo1_bots_nav") != "" && getdvarint("bo1_bots_nav") == 0)
+		return goal;
+	// retracing a known path (wander mode recovery): walk it point to point exactly, no pathfinder
+	if(isDefined(self.bo1.rec_mode))
 		return goal;
 	if(distance(self.origin, goal) < 90)
 		return goal;

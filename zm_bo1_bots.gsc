@@ -1458,6 +1458,11 @@ bo1_george_water_goal()
 
 // ---------------------------------------------------------------- knife confidence
 //
+// On top of this roll, a CORNERED bot always knifes when any of these is true (bo1_knife_ok): the zombie has 150 health or less
+// (bo1_bots_knife_hp), the gun in its hands is empty, or it owns a bowie / sickle and the round is 10 or lower
+// (bo1_bots_knife_round). A zombie with 150 health or less is knifed even when the bot is not cornered, but only when it is close.
+// A bot that does not plan to knife backs away from the nearest zombie (170 units). Everything else about knifing is as before.
+//
 // Confidence 0-100 = chance that a bot runs up and knifes a zombie instead of shooting it. Rolled once per zombie
 // and kept for 5s so the bot doesn't flip-flop.
 //   round 1                      : 100 (knife only anyway)
@@ -1570,7 +1575,18 @@ bo1_knife_rush(z)
 		b.rush_z = z;
 		return true;
 	}
-	if((getdvar("bo1_bots_knife_rush") != "" && getdvarint("bo1_bots_knife_rush") == 0) || bo1_is_dog(z) || self.health < self.maxhealth * 0.4)
+	if((getdvar("bo1_bots_knife_rush") != "" && getdvarint("bo1_bots_knife_rush") == 0) || bo1_is_dog(z))
+	{
+		b.rush_z = undefined;
+		return false;
+	}
+	// cornered and one of the conditions is true: knife, whatever the roll says
+	if(self bo1_knife_ok(z))
+	{
+		b.rush_z = z;
+		return true;
+	}
+	if(self.health < self.maxhealth * 0.4)
 	{
 		b.rush_z = undefined;
 		return false;
@@ -1590,6 +1606,71 @@ bo1_knife_rush(z)
 	}
 	b.rush_z = undefined;
 	return false;
+}
+
+// A bot knifes z when:
+//   - z has 150 health or less (bo1_bots_knife_hp, default 150) AND is close (within bo1_bots_knife_close, default 150 units),
+//     cornered or not (a bot under 40% health only if cornered)
+// or, when it is cornered by z, when ANY of these is true:
+//   - the gun in its hands is empty (clip at 0)
+//   - it owns a bowie knife or sickle and the round is 10 or lower (bo1_bots_knife_round, default 10); after that the
+//     knife no longer kills, so owning one stops counting
+bo1_knife_ok(z)
+{
+	maxhp = 150;
+	if(getdvar("bo1_bots_knife_hp") != "")
+		maxhp = getdvarint("bo1_bots_knife_hp");
+	close = 150;
+	if(getdvar("bo1_bots_knife_close") != "")
+		close = getdvarint("bo1_bots_knife_close");
+	if(z.health <= maxhp && self.health >= self.maxhealth * 0.4 && distance(self.origin, z.origin) <= close)
+		return true;
+
+	ok = z.health <= maxhp;
+	if(!ok)
+	{
+		w = self getcurrentweapon();
+		if(isDefined(w) && w != "none" && self getweaponammoclip(w) <= 0)
+			ok = true;
+	}
+	if(!ok)
+	{
+		maxr = 10;
+		if(getdvar("bo1_bots_knife_round") != "")
+			maxr = getdvarint("bo1_bots_knife_round");
+		if(bo1_cur_round() <= maxr && self bo1_has_melee_upgrade())
+			ok = true;
+	}
+	if(!ok)
+		return false;
+	return self bo1_is_cornered(z);
+}
+
+// cornered = z is right on us and there is no way back: walls behind us and to both back corners (2 of the 3 blocked),
+// or three or more zombies packed around us.
+bo1_is_cornered(z)
+{
+	if(distance2d(self.origin, z.origin) > 110 || abs(self.origin[2] - z.origin[2]) > 70)
+		return false;
+	if(bo1_count_zombies(self.origin, 120) >= 3)
+		return true;
+	away = (self.origin[0] - z.origin[0], self.origin[1] - z.origin[1], 0);
+	if(lengthsquared(away) < 1)
+		away = (randomfloatrange(-1, 1), randomfloatrange(-1, 1), 0);
+	ang = vectortoangles(away);
+	start = self.origin + (0, 0, 40);
+	offs = [];
+	offs[0] = 0;
+	offs[1] = 45;
+	offs[2] = -45;
+	blocked = 0;
+	for(i = 0; i < offs.size; i++)
+	{
+		dir = anglestoforward((0, ang[1] + offs[i], 0));
+		if(!bullettracepassed(start, start + dir * 100, false, self))
+			blocked++;
+	}
+	return blocked >= 2;
 }
 
 // round 1 is knife only (no guns, no grenades); later rounds are back to normal
@@ -1766,15 +1847,9 @@ bo1_shoot(z, zd)
 		return;
 	}
 
-	if(zd < 80)
-	{
-		if(level.bo1_fire == "script")
-			self bo1_script_knife(z);
-		else
-			self bo1_melee_tap();
-	}
-	else
-		self bo1_off("melee");
+	// no automatic knife swing when a zombie gets close: the bot keeps shooting. It only knifes through the paths above
+	// (round 1, the confidence roll, or cornered with a condition true, see bo1_knife_ok).
+	self bo1_off("melee");
 
 	maxr = 1400;
 	if(bo1_is_shotgun(w))
@@ -3449,6 +3524,26 @@ bo1_count_zombies(origin, r)
 	return n;
 }
 
+// the nearest living hostile within r units, or undefined
+bo1_nearest_zombie(r)
+{
+	zs = bo1_enemies();
+	best = undefined;
+	bd = r * r;
+	for(i = 0; i < zs.size; i++)
+	{
+		if(!isDefined(zs[i]) || !isAlive(zs[i]))
+			continue;
+		d = distancesquared(self.origin, zs[i].origin);
+		if(d < bd)
+		{
+			bd = d;
+			best = zs[i];
+		}
+	}
+	return best;
+}
+
 // frags / monkey bomb / bouncing betty at groups of zombies
 bo1_throw_think(z)
 {
@@ -4287,6 +4382,10 @@ bo1bots_brain()
 			}
 			if(rush && zd > 140)
 				self.bo1.rush_run_t = gettime() + 300;
+			// not planning to knife: never stay close to ANY zombie, not only the one being shot at
+			nz = undefined;
+			if(!bo1_knife_only() && !rush)
+				nz = self bo1_nearest_zombie(170);
 			self bo1_shoot(z, zd);
 
 			// a power-up in sight beats backing off / closing in, unless the zombie is right on us
@@ -4303,9 +4402,12 @@ bo1bots_brain()
 					self bo1_stop();
 			}
 			// back off from close zombies, otherwise keep going to the goal
-			else if(zd < 170)
+			else if(isDefined(nz) || zd < 170)
 			{
-				self bo1_move_dir(self.origin - z.origin);
+				bfrom = z.origin;
+				if(isDefined(nz))
+					bfrom = nz.origin;
+				self bo1_move_dir(self.origin - bfrom);
 			}
 			else if(isDefined(goal))
 			{

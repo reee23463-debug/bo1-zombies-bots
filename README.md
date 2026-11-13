@@ -43,7 +43,7 @@ Set in the console or config before the map starts.
 |`bo1_bots_names`|built-in list|Comma-separated bot names|
 |`bo1_bots_friend_names`|none|Comma-separated names handed out first|
 |`bo1_bots_debug`|0|Show debug messages on screen|
-|`bo1_bots_wander 1`|0|Makes the bots independent lads without following you|
+|`bo1_bots_wander`|0|Makes the bots independent lads without following you|
 
 More options (fire mode, window repair mode, buy mode, tags, Moon and Dead Ops Arcade behavior) are listed in the comments at the top of the script.
 

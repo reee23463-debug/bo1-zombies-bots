@@ -1,0 +1,17 @@
+Rook,3arc
+Price,3arc
+Ghost,3arc
+Hawk,3arc
+Mason,3arc
+Woods,3arc
+Menendez,3arc
+Justabotloll,3arc
+FreddyFazbear,3arc
+Wetnapkin,3arc
+Coughingbaby,3arc
+Quickfox,3arc
+Lazydog,3arc
+Bell,3arc
+David,3arc
+Youstoopid,3arc
+Terrifyingsupper,3arc

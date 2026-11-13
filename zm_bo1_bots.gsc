@@ -49,6 +49,7 @@ bo1bots_start()
 	level endon("end_game");
 
 	hc_t = undefined;
+	st = gettime();
 	for(;;)
 	{
 		wait 0.25;
@@ -56,7 +57,14 @@ bo1bots_start()
 		// Waiting for "alive" + a delay + 1.5s per bot let round 1 start first, and a player who connects after the
 		// round has begun sits as a spectator until the next round.
 		if(bo1bots_humans_connected() <= 0)
-			continue;
+		{
+			// fast_restart: the game can sit on "waiting for players" (zombies_minplayers / sp_minplayers) before the human
+			// counts as connected, and bots are what it is waiting for. After 5s with nobody connected, add them anyway.
+			if(gettime() - st < 5000)
+				continue;
+			bo1bots_dbg("no human connected after 5s, adding bots anyway (fast_restart?)");
+			break;
+		}
 		// Dead Ops Arcade has no round_number
 		if(!isDefined(level.round_number) && !bo1_is_arcade())
 		{

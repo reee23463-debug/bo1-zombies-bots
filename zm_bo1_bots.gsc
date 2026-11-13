@@ -2936,7 +2936,7 @@ bo1_pick_shop()
 					continue;
 				if(isDefined(e.has_been_opened) && e.has_been_opened)
 					continue;
-				self bo1_consider(e, "door", 40, e.zombie_cost, door_r);
+				self bo1_consider(e, "door", 55, e.zombie_cost, door_r);
 			}
 		}
 	}
@@ -3045,6 +3045,8 @@ bo1_do_shop()
 			wait 0.5;
 			if(isDefined(shop) && isDefined(shop.has_been_opened) && shop.has_been_opened)
 				self bo1_fix_cost(before, self.bo1.shop_cost);
+			else if(isDefined(shop))
+				bo1bots_dbg(self.name + " pressed use at a door (dist " + int(distance2d(self.origin, shop.origin)) + ", cost " + self.bo1.shop_cost + ", score " + self.score + ") but it did not open");
 			level.bo1bots_last_door = gettime();
 			self.bo1.skip[key] = gettime() + 20000;
 			break;
@@ -4311,7 +4313,18 @@ bo1bots_brain()
 			}
 			if(isDefined(self.bo1.shop))
 			{
-				if(distance2d(self.origin, self.bo1.shop.origin) < 75 && abs(self.origin[2] - self.bo1.shop.origin[2]) < 70)
+				// doors and debris are big: their origin is the middle of the door / pile, which the bot can never stand next to
+				// bo1_bots_door_use_dist = how close counts as "at the door" (default 150)
+				use_d = 75;
+				use_z = 70;
+				if(self.bo1.shop_kind == "door")
+				{
+					use_d = 150;
+					if(getdvar("bo1_bots_door_use_dist") != "")
+						use_d = getdvarint("bo1_bots_door_use_dist");
+					use_z = 100;
+				}
+				if(distance2d(self.origin, self.bo1.shop.origin) < use_d && abs(self.origin[2] - self.bo1.shop.origin[2]) < use_z)
 				{
 					self bo1_do_shop();
 					self.bo1.shop = undefined;
@@ -4455,6 +4468,8 @@ bo1bots_brain()
 					else if(!isDefined(self.bo1.rec_mode) && self.bo1.stuck >= 4)
 					{
 						self.bo1.stuck = 0;
+						if(isDefined(self.bo1.shop) && isDefined(self.bo1.shop_key))
+							self.bo1.skip[self.bo1.shop_key] = gettime() + 30000;
 						self.bo1.shop = undefined;
 						// stuck on the way to a downed player: the path a player walked is the best bet to get there
 						if(isDefined(self.bo1.rev_goal_t) && gettime() - self.bo1.rev_goal_t < 1500 && self bo1_recover_player())
@@ -4466,6 +4481,8 @@ bo1bots_brain()
 				else if(self.bo1.stuck >= 4 && isDefined(leader))
 				{
 					self.bo1.stuck = 0;
+					if(isDefined(self.bo1.shop) && isDefined(self.bo1.shop_key))
+						self.bo1.skip[self.bo1.shop_key] = gettime() + 30000;
 					self.bo1.shop = undefined;
 					self bo1_teleport_to(leader);
 				}
